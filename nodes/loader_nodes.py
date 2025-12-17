@@ -3,7 +3,7 @@ Loader nodes for quantized models.
 
 These nodes provide custom model loading with:
 - Kernel backend selection (pytorch/triton)
-- Format auto-detection from .comfy_quant metadata
+- Legacy format support (scale_weight -> weight_scale conversion)
 - Support for INT8, NF4, FP4, and FP8 variants
 """
 
@@ -19,7 +19,8 @@ class QuantizedModelLoader:
     """
     Load models with custom quantization layouts and kernel backend selection.
     
-    Supports models quantized by convert_to_quant with --comfy_quant flag.
+    Supports models quantized by convert_to_quant (with or without --comfy_quant flag).
+    Automatically handles legacy scale_weight -> weight_scale conversion.
     """
     
     @classmethod
@@ -37,7 +38,7 @@ class QuantizedModelLoader:
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load checkpoints with custom quantization support (INT8, NF4, FP4, FP8 variants)"
+    DESCRIPTION = "Load checkpoints with custom quantization support (INT8, NF4, FP4, FP8 variants). Handles legacy format conversion."
     
     def load_checkpoint(self, ckpt_name, kernel_backend, force_dequant=False):
         """Load a checkpoint with the specified kernel backend."""
@@ -54,13 +55,22 @@ class QuantizedModelLoader:
         # Get full checkpoint path
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
         
-        # Use ComfyUI's standard checkpoint loading
-        # The layouts we registered will handle the quantized tensors automatically
+        # Import HybridINT8Ops for legacy format support
+        try:
+            from ..int8_ops import HybridINT8Ops
+            model_options = {"custom_operations": HybridINT8Ops}
+            logging.info("QuantizedModelLoader: Using HybridINT8Ops for legacy format support")
+        except ImportError as e:
+            logging.warning(f"HybridINT8Ops not available: {e}")
+            model_options = {}
+        
+        # Use ComfyUI's checkpoint loading with our custom operations
         out = comfy.sd.load_checkpoint_guess_config(
             ckpt_path,
             output_vae=True,
             output_clip=True,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            model_options=model_options,
         )
         
         model = out[0]
@@ -81,7 +91,7 @@ class QuantizedUNETLoader:
     """
     Load UNET/diffusion models with custom quantization layouts.
     
-    More focused version for loading just the diffusion model.
+    Handles legacy scale_weight format automatically.
     """
     
     @classmethod
@@ -90,22 +100,22 @@ class QuantizedUNETLoader:
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
                 "kernel_backend": (["pytorch", "triton"],),
-                "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e5m2"],),
             },
         }
     
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load diffusion models with custom quantization support"
+    DESCRIPTION = "Load diffusion models with custom quantization support. Handles legacy format conversion."
     
-    def load_unet(self, unet_name, kernel_backend, weight_dtype):
+    def load_unet(self, unet_name, kernel_backend):
         """Load a UNET model with the specified settings."""
         
         # Set kernel backend
         try:
             from ..quant_layouts.int8_layout import BlockWiseINT8Layout
             BlockWiseINT8Layout.set_backend(kernel_backend)
+            logging.info(f"QuantizedUNETLoader: Set INT8 backend to '{kernel_backend}'")
         except Exception as e:
             if kernel_backend == "triton":
                 logging.warning(f"Failed to set Triton backend: {e}")
@@ -113,8 +123,17 @@ class QuantizedUNETLoader:
         # Get model path
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
         
-        # Load the model
-        model = comfy.sd.load_diffusion_model(unet_path)
+        # Import HybridINT8Ops for legacy format support
+        try:
+            from ..int8_ops import HybridINT8Ops
+            model_options = {"custom_operations": HybridINT8Ops}
+            logging.info("QuantizedUNETLoader: Using HybridINT8Ops for legacy format support")
+        except ImportError as e:
+            logging.warning(f"HybridINT8Ops not available: {e}")
+            model_options = {}
+        
+        # Load the model with our custom operations
+        model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
         
         return (model,)
 
