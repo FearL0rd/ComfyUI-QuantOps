@@ -1,0 +1,34 @@
+[project]
+name = "comfyui-quantops"
+version = "0.1.0"
+description = "Extended quantization layouts for ComfyUI (INT8, NF4, FP4, row/block-wise FP8)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "silveroxides"}
+]
+keywords = ["comfyui", "quantization", "fp8", "int8", "nf4", "fp4", "ai", "inference"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/silveroxides/ComfyUI-QuantOps"
+"Bug Tracker" = "https://github.com/silveroxides/ComfyUI-QuantOps/issues"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quant_layouts*", "kernels*", "nodes*"]

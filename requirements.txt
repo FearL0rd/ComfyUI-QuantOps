@@ -1,0 +1,5 @@
+# No hard dependencies - PyTorch provided by ComfyUI
+# 
+# For Triton support (optional), install in your venv:
+#   Linux:   pip install triton
+#   Windows: pip install triton-windows
