@@ -61,16 +61,18 @@ class HybridINT8Ops(manual_cast):
             state_dict.pop(prefix + 'input_scale', None)
             state_dict.pop(prefix + 'scale_input', None)
             
-            # Remove comfy_quant if present (we handle it ourselves)
+            # Parse comfy_quant metadata for layout type and block_size
             comfy_quant_tensor = state_dict.pop(prefix + 'comfy_quant', None)
+            self.quant_format = None  # Default: infer from scale shape
             
-            # Parse block_size from comfy_quant if available
             if comfy_quant_tensor is not None:
                 try:
                     import json
                     json_str = ''.join(chr(c) for c in comfy_quant_tensor.tolist())
                     metadata = json.loads(json_str)
                     self.block_size = metadata.get('params', {}).get('group_size', 128)
+                    self.quant_format = metadata.get('format', None)  # 'int8_lodewise' or 'int8_blockwise'
+                    logging.debug(f"Parsed comfy_quant: format={self.quant_format}, block_size={self.block_size}")
                 except Exception as e:
                     logging.debug(f"Failed to parse comfy_quant metadata: {e}")
             
@@ -118,26 +120,57 @@ class HybridINT8Ops(manual_cast):
                 self.bias = None
         
         def _dequantize_weight(self, weight, scale, input_dtype):
-            """Dequantize INT8 weight to float."""
+            """Dequantize INT8 weight to float.
+            
+            Handles two INT8 formats:
+            - Lodewise (int8_lodewise): scale shape (N, K//block_size) - per-row, per-K-block
+            - Blockwise (int8_blockwise): scale shape (N//block_size, K//block_size) - 2D tile grid
+            
+            Uses quant_type from comfy_quant metadata if available, otherwise infers from scale shape.
+            """
             if isinstance(weight, QuantizedTensor):
                 return weight.dequantize()
             
             if weight.dtype == torch.int8 and scale is not None:
-                # Blockwise dequantization
-                M, N = weight.shape
+                N, K = weight.shape  # Weight is (out_features, in_features)
                 block_size = self.block_size
+                k_blocks = K // block_size if K % block_size == 0 else (K + block_size - 1) // block_size
                 
-                # Check scale shape to determine dequant strategy
-                if scale.ndim == 2:
-                    # 2D scale: (M//bs, N//bs) - true blockwise
-                    if M % block_size == 0 and N % block_size == 0:
-                        qdata_blocked = weight.reshape(M // block_size, block_size, N // block_size, block_size)
-                        qdata_blocked = qdata_blocked.permute(0, 2, 1, 3)
-                        scale_broadcast = scale.unsqueeze(-1).unsqueeze(-1)
-                        dequant = qdata_blocked.to(input_dtype) * scale_broadcast.to(device=weight.device, dtype=input_dtype)
-                        return dequant.permute(0, 2, 1, 3).reshape(M, N)
+                # Use quant_format from metadata if available
+                quant_format = getattr(self, 'quant_format', None)
                 
-                # Fallback: simple scaling
+                # Lodewise dequantization
+                if quant_format == 'int8_lodewise' or (quant_format is None and scale.ndim == 2 and scale.shape[0] == N):
+                    if K % block_size == 0 and scale.shape == (N, k_blocks):
+                        # Lodewise: scale shape (N, K//block_size) - per-row, per-K-block
+                        qdata_blocked = weight.reshape(N, k_blocks, block_size)
+                        scale_broadcast = scale.unsqueeze(-1).to(device=weight.device, dtype=input_dtype)
+                        dequant = qdata_blocked.to(input_dtype) * scale_broadcast
+                        return dequant.reshape(N, K)
+                
+                # Blockwise dequantization
+                if quant_format == 'int8_blockwise' or (quant_format is None and scale.ndim == 2):
+                    if N % block_size == 0 and K % block_size == 0:
+                        expected_shape = (N // block_size, K // block_size)
+                        if scale.shape == expected_shape:
+                            qdata_blocked = weight.reshape(N // block_size, block_size, K // block_size, block_size)
+                            qdata_blocked = qdata_blocked.permute(0, 2, 1, 3)
+                            scale_broadcast = scale.unsqueeze(-1).unsqueeze(-1).to(device=weight.device, dtype=input_dtype)
+                            dequant = qdata_blocked.to(input_dtype) * scale_broadcast
+                            return dequant.permute(0, 2, 1, 3).reshape(N, K)
+                
+                # 1D scale fallback
+                if scale.ndim == 1:
+                    if scale.shape[0] == N:
+                        # Per-row scaling
+                        scale_broadcast = scale.unsqueeze(-1).to(device=weight.device, dtype=input_dtype)
+                        return weight.to(input_dtype) * scale_broadcast
+                    elif scale.shape[0] == 1:
+                        # Per-tensor scaling
+                        return weight.to(input_dtype) * scale.item()
+                
+                # Fallback: try broadcasting
+                logging.warning(f"INT8 format={quant_format}, scale shape {scale.shape} for weight {weight.shape}, using broadcast")
                 return weight.to(input_dtype) * scale.to(device=weight.device, dtype=input_dtype)
             
             return weight.to(input_dtype)
