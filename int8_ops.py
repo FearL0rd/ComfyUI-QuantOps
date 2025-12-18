@@ -67,11 +67,11 @@ class HybridINT8Ops(manual_cast):
             
             if comfy_quant_tensor is not None:
                 try:
-                    import json
-                    json_str = ''.join(chr(c) for c in comfy_quant_tensor.tolist())
-                    metadata = json.loads(json_str)
-                    self.block_size = metadata.get('params', {}).get('group_size', 128)
-                    self.quant_format = metadata.get('format', None)  # 'int8_lodewise' or 'int8_blockwise'
+                    from .comfy_quant_helpers import tensor_to_dict
+                    layer_conf = tensor_to_dict(comfy_quant_tensor)
+                    # Flat structure: group_size at root level, not nested in params
+                    self.block_size = layer_conf.get('group_size', 128)
+                    self.quant_format = layer_conf.get('format', None)  # 'int8_lodewise' or 'int8_blockwise'
                     logging.debug(f"Parsed comfy_quant: format={self.quant_format}, block_size={self.block_size}")
                 except Exception as e:
                     logging.debug(f"Failed to parse comfy_quant metadata: {e}")
