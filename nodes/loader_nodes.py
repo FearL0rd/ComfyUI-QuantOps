@@ -55,14 +55,21 @@ class QuantizedModelLoader:
         # Get full checkpoint path
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
         
-        # Import HybridINT8Ops for legacy format support
+        # Try to use HybridNF4Ops first (handles both 4-bit and falls through for others)
+        # Then fall back to HybridINT8Ops for INT8 models
+        model_options = {}
         try:
-            from ..int8_ops import HybridINT8Ops
-            model_options = {"custom_operations": HybridINT8Ops}
-            logging.info("QuantizedModelLoader: Using HybridINT8Ops for legacy format support")
+            from ..nf4_ops import HybridNF4Ops
+            model_options = {"custom_operations": HybridNF4Ops}
+            logging.info("QuantizedModelLoader: Using HybridNF4Ops for 4-bit support")
         except ImportError as e:
-            logging.warning(f"HybridINT8Ops not available: {e}")
-            model_options = {}
+            logging.debug(f"HybridNF4Ops not available: {e}")
+            try:
+                from ..int8_ops import HybridINT8Ops
+                model_options = {"custom_operations": HybridINT8Ops}
+                logging.info("QuantizedModelLoader: Using HybridINT8Ops for INT8 support")
+            except ImportError as e:
+                logging.warning(f"No quantized ops available: {e}")
         
         # Use ComfyUI's checkpoint loading with our custom operations
         out = comfy.sd.load_checkpoint_guess_config(
@@ -123,14 +130,20 @@ class QuantizedUNETLoader:
         # Get model path
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
         
-        # Import HybridINT8Ops for legacy format support
+        # Try to use HybridNF4Ops first (handles both 4-bit and falls through for others)
+        model_options = {}
         try:
-            from ..int8_ops import HybridINT8Ops
-            model_options = {"custom_operations": HybridINT8Ops}
-            logging.info("QuantizedUNETLoader: Using HybridINT8Ops for legacy format support")
+            from ..nf4_ops import HybridNF4Ops
+            model_options = {"custom_operations": HybridNF4Ops}
+            logging.info("QuantizedUNETLoader: Using HybridNF4Ops for 4-bit support")
         except ImportError as e:
-            logging.warning(f"HybridINT8Ops not available: {e}")
-            model_options = {}
+            logging.debug(f"HybridNF4Ops not available: {e}")
+            try:
+                from ..int8_ops import HybridINT8Ops
+                model_options = {"custom_operations": HybridINT8Ops}
+                logging.info("QuantizedUNETLoader: Using HybridINT8Ops for INT8 support")
+            except ImportError as e:
+                logging.warning(f"No quantized ops available: {e}")
         
         # Load the model with our custom operations
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)

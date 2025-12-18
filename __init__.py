@@ -50,13 +50,20 @@ def _register_layouts():
             "group_size": 64,
         })
         
-        # Try to register NF4/FP4 layouts (may fail if kernels have issues)
+        # Try to register NF4/FP4/AF4 layouts (may fail if kernels have issues)
         try:
             from .quant_layouts.nf4_layout import NF4Layout
             LAYOUTS.setdefault("NF4Layout", NF4Layout)
             QUANT_ALGOS.setdefault("bnb_nf4", {
                 "storage_t": torch.uint8,
-                "parameters": {"absmax"},
+                "parameters": {"absmax", "quant_map"},
+                "comfy_tensor_layout": "NF4Layout",
+                "group_size": 64,
+            })
+            # AF4 uses same layout as NF4, just different codebook
+            QUANT_ALGOS.setdefault("bnb_af4", {
+                "storage_t": torch.uint8,
+                "parameters": {"absmax", "quant_map"},
                 "comfy_tensor_layout": "NF4Layout",
                 "group_size": 64,
             })
@@ -68,7 +75,7 @@ def _register_layouts():
             LAYOUTS.setdefault("FP4Layout", FP4Layout)
             QUANT_ALGOS.setdefault("bnb_fp4", {
                 "storage_t": torch.uint8,
-                "parameters": {"absmax"},
+                "parameters": {"absmax", "quant_map"},
                 "comfy_tensor_layout": "FP4Layout",
                 "group_size": 64,
             })
