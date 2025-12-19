@@ -180,39 +180,74 @@ class QuantizedUNETLoader:
             try:
                 from ..shape_utils import restore_shapes_for_detection, restore_packed_weights
                 import comfy.model_detection
+                import comfy.model_management
+                import comfy.model_patcher
                 
                 # Load raw state dict
                 sd, metadata = comfy.utils.load_torch_file(unet_path, safe_load=True, return_metadata=True)
                 
-                # Restore shapes for model detection
+                # Restore shapes for model detection (creates proxy bfloat16 tensors)
                 processed_sd, shape_info = restore_shapes_for_detection(sd)
                 
                 if len(shape_info) > 0:
                     logging.info(f"QuantizedUNETLoader: Restored {len(shape_info)} tensor shapes for model detection")
                     
-                    # Detect model config with corrected shapes
+                    # Strip model prefix if present
                     diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(processed_sd)
-                    temp_sd = comfy.utils.state_dict_prefix_replace(processed_sd, {diffusion_model_prefix: ""}, filter_keys=True)
-                    if len(temp_sd) > 0:
-                        processed_sd = temp_sd
-                        # Also update shape_info keys
-                        new_shape_info = {}
-                        for k, v in shape_info.items():
-                            new_key = k.replace(diffusion_model_prefix, "") if k.startswith(diffusion_model_prefix) else k
-                            new_shape_info[new_key] = v
-                        shape_info = new_shape_info
+                    detection_sd = comfy.utils.state_dict_prefix_replace(processed_sd, {diffusion_model_prefix: ""}, filter_keys=True)
+                    if len(detection_sd) > 0:
+                        processed_sd = detection_sd
                     
-                    # Now restore packed weights for actual loading
-                    final_sd = restore_packed_weights(processed_sd, shape_info)
+                    # *** Run model detection with shape-restored state_dict ***
+                    model_config = comfy.model_detection.model_config_from_unet(processed_sd, "", metadata=metadata)
                     
-                    # Use load_diffusion_model_state_dict with our pre-processed state dict
-                    model = comfy.sd.load_diffusion_model_state_dict(final_sd, model_options=model_options, metadata=metadata)
-                    if model is not None:
-                        return (model,)
+                    if model_config is None:
+                        logging.warning("Model detection failed even with shape restoration")
                     else:
-                        logging.warning("Shape-restored loading failed, falling back to standard loader")
+                        logging.info(f"QuantizedUNETLoader: Detected model config: {type(model_config).__name__}")
+                        
+                        # Now prepare actual state_dict for loading (with packed weights)
+                        loading_sd = comfy.utils.state_dict_prefix_replace(sd, {diffusion_model_prefix: ""}, filter_keys=True)
+                        if len(loading_sd) == 0:
+                            loading_sd = sd
+                        
+                        # Set up model config with our custom operations
+                        if model_options.get("custom_operations"):
+                            model_config.custom_operations = model_options["custom_operations"]
+                        
+                        # Configure dtype and device
+                        load_device = comfy.model_management.get_torch_device()
+                        offload_device = comfy.model_management.unet_offload_device()
+                        parameters = comfy.utils.calculate_parameters(loading_sd)
+                        
+                        unet_dtype = model_options.get("dtype", None)
+                        if unet_dtype is None:
+                            unet_dtype = comfy.model_management.unet_dtype(
+                                model_params=parameters, 
+                                supported_dtypes=list(model_config.supported_inference_dtypes)
+                            )
+                        
+                        manual_cast_dtype = comfy.model_management.unet_manual_cast(
+                            unet_dtype, load_device, model_config.supported_inference_dtypes
+                        )
+                        model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
+                        
+                        # Build model and load weights
+                        model = model_config.get_model(loading_sd, "")
+                        model = model.to(offload_device)
+                        model.load_model_weights(loading_sd, "")
+                        
+                        model_patcher = comfy.model_patcher.ModelPatcher(
+                            model, load_device=load_device, offload_device=offload_device
+                        )
+                        
+                        logging.info("QuantizedUNETLoader: Successfully loaded 4-bit model with shape restoration")
+                        return (model_patcher,)
+                        
             except Exception as e:
-                logging.warning(f"Shape restoration failed: {e}, falling back to standard loader")
+                import traceback
+                logging.warning(f"Shape restoration failed: {e}")
+                logging.debug(traceback.format_exc())
         
         # Standard loading path (works for INT8 and non-quantized)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)

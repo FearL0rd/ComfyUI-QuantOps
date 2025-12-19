@@ -26,13 +26,40 @@ def parse_quant_state(quant_state_tensor):
         return None
 
 
+class ShapeProxy:
+    """
+    Lightweight proxy that mimics a tensor for model_detection purposes.
+    
+    Only provides .shape, .dtype, .device attributes that model_detection reads.
+    Uses no memory for actual tensor data.
+    """
+    def __init__(self, shape, dtype=torch.bfloat16):
+        self._shape = torch.Size(shape) if not isinstance(shape, torch.Size) else shape
+        self._dtype = dtype
+        
+    @property
+    def shape(self):
+        return self._shape
+    
+    @property
+    def dtype(self):
+        return self._dtype
+    
+    @property
+    def device(self):
+        return torch.device('cpu')
+    
+    def __repr__(self):
+        return f"ShapeProxy(shape={self._shape}, dtype={self._dtype})"
+
+
 def restore_shapes_for_detection(state_dict, prefix=""):
     """
     Pre-process state_dict to restore original shapes for model detection.
     
     For each 4-bit quantized weight, replaces the packed uint8 tensor with a 
-    proxy bfloat16 tensor of the original shape. This allows model_detection
-    to work correctly.
+    ShapeProxy that has the original shape. This allows model_detection
+    to work correctly without allocating memory for proxy tensors.
     
     Returns:
         tuple: (processed_sd, shape_info) where shape_info maps weight keys to their
@@ -109,9 +136,8 @@ def restore_shapes_for_detection(state_dict, prefix=""):
                         
                         # Store original packed weight for later
                         shape_info[key] = value
-                        # Create proxy tensor with original shape
-                        proxy = torch.zeros(list(orig_shape), dtype=torch.bfloat16)
-                        processed_sd[key] = proxy
+                        # Create lightweight shape proxy (no memory allocation)
+                        processed_sd[key] = ShapeProxy(orig_shape)
                         logging.debug(f"Shape restoration: {key} {value.shape} -> {orig_shape}")
                         continue
                     except Exception as e:
