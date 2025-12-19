@@ -175,7 +175,46 @@ class QuantizedUNETLoader:
                 except ImportError as e:
                     logging.warning(f"No quantized ops available: {e}")
         
-        # Load the model with our custom operations
+        # For 4-bit models, use shape restoration to fix model detection
+        if quant_format == "4bit (NF4/FP4/AF4)":
+            try:
+                from ..shape_utils import restore_shapes_for_detection, restore_packed_weights
+                import comfy.model_detection
+                
+                # Load raw state dict
+                sd, metadata = comfy.utils.load_torch_file(unet_path, safe_load=True, return_metadata=True)
+                
+                # Restore shapes for model detection
+                processed_sd, shape_info = restore_shapes_for_detection(sd)
+                
+                if len(shape_info) > 0:
+                    logging.info(f"QuantizedUNETLoader: Restored {len(shape_info)} tensor shapes for model detection")
+                    
+                    # Detect model config with corrected shapes
+                    diffusion_model_prefix = comfy.model_detection.unet_prefix_from_state_dict(processed_sd)
+                    temp_sd = comfy.utils.state_dict_prefix_replace(processed_sd, {diffusion_model_prefix: ""}, filter_keys=True)
+                    if len(temp_sd) > 0:
+                        processed_sd = temp_sd
+                        # Also update shape_info keys
+                        new_shape_info = {}
+                        for k, v in shape_info.items():
+                            new_key = k.replace(diffusion_model_prefix, "") if k.startswith(diffusion_model_prefix) else k
+                            new_shape_info[new_key] = v
+                        shape_info = new_shape_info
+                    
+                    # Now restore packed weights for actual loading
+                    final_sd = restore_packed_weights(processed_sd, shape_info)
+                    
+                    # Use load_diffusion_model_state_dict with our pre-processed state dict
+                    model = comfy.sd.load_diffusion_model_state_dict(final_sd, model_options=model_options, metadata=metadata)
+                    if model is not None:
+                        return (model,)
+                    else:
+                        logging.warning("Shape-restored loading failed, falling back to standard loader")
+            except Exception as e:
+                logging.warning(f"Shape restoration failed: {e}, falling back to standard loader")
+        
+        # Standard loading path (works for INT8 and non-quantized)
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
         
         return (model,)
