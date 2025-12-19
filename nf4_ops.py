@@ -19,6 +19,15 @@ import logging
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
 from comfy.quant_ops import QuantizedTensor, LAYOUTS
 
+# Try to import bitsandbytes for efficient dequantization
+try:
+    import bitsandbytes.functional as bnb_F
+    _HAS_BNB = True
+    logging.info("bitsandbytes available for 4-bit dequantization")
+except ImportError:
+    _HAS_BNB = False
+    logging.info("bitsandbytes not available, using fallback dequantization")
+
 # Try to import our NF4/FP4 layouts
 try:
     from .quant_layouts.nf4_layout import NF4Layout, _check_nf4_available, _get_nf4_function
@@ -199,57 +208,87 @@ class HybridNF4Ops(manual_cast):
                 self.bias = None
         
         def _dequantize_weight(self, weight, input_dtype):
-            """Dequantize 4-bit weight to float."""
+            """Dequantize 4-bit weight to float.
+            
+            Priority:
+            1. QuantizedTensor.dequantize() if wrapped in QuantizedTensor
+            2. bitsandbytes.functional.dequantize_4bit if available
+            3. Pure PyTorch fallback (slower but no dependencies)
+            """
             if isinstance(weight, QuantizedTensor):
                 return weight.dequantize()
             
-            # Manual dequantization fallback
+            # 4-bit dequantization required
             if weight.dtype == torch.uint8 and self.absmax is not None:
-                logging.warning("Manual 4-bit dequantization fallback - this may be slow")
-                # This requires the kernel functions
-                if self.quant_type in ('nf4', 'af4') and _HAS_NF4_LAYOUT:
-                    try:
-                        dequantize_nf4 = _get_nf4_function('dequantize_nf4')
-                        QuantState4bit = _get_nf4_function('QuantState4bit')
-                        NF4_CODEBOOK = _get_nf4_function('NF4_CODEBOOK')
-                        
-                        code = self.quant_map if self.quant_map is not None else NF4_CODEBOOK.to(weight.device)
-                        shape = torch.Size(self.original_shape) if self.original_shape else weight.shape
-                        orig_dtype = getattr(torch, self.original_dtype, input_dtype) if isinstance(self.original_dtype, str) else input_dtype
-                        
-                        quant_state = QuantState4bit(
-                            absmax=self.absmax.to(weight.device),
-                            shape=shape,
-                            code=code.to(weight.device),
-                            blocksize=self.block_size,
-                            quant_type=self.quant_type,
-                            dtype=orig_dtype,
-                        )
-                        return dequantize_nf4(weight, quant_state, input_dtype)
-                    except Exception as e:
-                        logging.error(f"NF4 dequantization failed: {e}")
+                absmax = self.absmax.to(weight.device)
+                block_size = self.block_size
+                shape = torch.Size(self.original_shape) if self.original_shape else weight.shape
+                quant_type = self.quant_type if self.quant_type else 'nf4'
                 
-                elif self.quant_type == 'fp4' and _HAS_FP4_LAYOUT:
+                # Method 1: Try bitsandbytes (most efficient)
+                if _HAS_BNB:
                     try:
-                        dequantize_fp4 = _get_fp4_function('dequantize_fp4')
-                        QuantState4bit = _get_fp4_function('QuantState4bit')
-                        FP4_CODEBOOK = _get_fp4_function('FP4_CODEBOOK_NORMALIZED')
-                        
-                        code = self.quant_map if self.quant_map is not None else FP4_CODEBOOK.to(weight.device)
-                        shape = torch.Size(self.original_shape) if self.original_shape else weight.shape
-                        orig_dtype = getattr(torch, self.original_dtype, input_dtype) if isinstance(self.original_dtype, str) else input_dtype
-                        
-                        quant_state = QuantState4bit(
-                            absmax=self.absmax.to(weight.device),
+                        # Create a QuantState for bitsandbytes
+                        quant_state = bnb_F.QuantState(
+                            absmax=absmax,
                             shape=shape,
-                            code=code.to(weight.device),
-                            blocksize=self.block_size,
-                            quant_type='fp4',
-                            dtype=orig_dtype,
+                            dtype=input_dtype,
+                            blocksize=block_size,
+                            quant_type=quant_type,
                         )
-                        return dequantize_fp4(weight, quant_state, input_dtype)
+                        return bnb_F.dequantize_4bit(weight, quant_state, quant_type=quant_type)
                     except Exception as e:
-                        logging.error(f"FP4 dequantization failed: {e}")
+                        logging.debug(f"bitsandbytes dequantize_4bit failed: {e}, falling back to PyTorch")
+                
+                # Method 2: Pure PyTorch fallback
+                # Get codebook
+                if self.quant_map is not None:
+                    code = self.quant_map.to(weight.device).to(input_dtype)
+                else:
+                    if quant_type in ('nf4', 'af4'):
+                        code = torch.tensor([
+                            -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+                            -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0,
+                            0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
+                            0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0,
+                        ], device=weight.device, dtype=input_dtype)
+                    else:  # fp4
+                        code = torch.tensor([
+                            0, 0.0625, 8.0, 12.0, 4.0, 6.0, 2.0, 3.0,
+                            -0, -0.0625, -8.0, -12.0, -4.0, -6.0, -2.0, -3.0
+                        ], device=weight.device, dtype=input_dtype)
+                        code = code / code.abs().max()  # Normalize
+                
+                # Unpack nibbles
+                A = weight.reshape(-1)
+                n_unpacked = A.size(0) * 2
+                out_indices = torch.empty(n_unpacked, dtype=torch.int32, device=weight.device)
+                out_indices[::2] = (A >> 4).to(torch.int32)
+                out_indices[1::2] = (A & 0xF).to(torch.int32)
+                
+                # Codebook lookup
+                out_dq = code[out_indices]
+                
+                # Trim to output size
+                n = shape.numel()
+                if out_dq.numel() > n:
+                    out_dq = out_dq[:n]
+                
+                # Apply blockwise scales
+                blocks = n // block_size
+                rem = n % block_size
+                has_rem = rem > 0
+                
+                out = torch.empty(n, dtype=input_dtype, device=weight.device)
+                if blocks > 0:
+                    out[:blocks * block_size] = (
+                        out_dq[:blocks * block_size].view(-1, block_size) 
+                        * absmax[:blocks].view(-1, 1)
+                    ).reshape(-1)
+                if has_rem:
+                    out[-rem:] = out_dq[-rem:] * absmax[-1]
+                
+                return out.view(shape).to(input_dtype)
             
             return weight.to(input_dtype)
         
