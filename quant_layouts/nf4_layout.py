@@ -4,7 +4,8 @@ NF4 (Normal Float 4-bit) Quantization Layout
 4-bit quantization using a codebook derived from the normal distribution.
 Reference: QLoRA paper (https://arxiv.org/abs/2305.14314)
 
-NOTE: NF4 kernels are lazy-imported - if not available, a helpful error is raised.
+This layout uses bitsandbytes for dequantization when available,
+with a pure PyTorch fallback for systems without bitsandbytes.
 """
 
 import torch
@@ -13,46 +14,69 @@ from typing import Tuple, Dict
 
 from comfy.quant_ops import QuantizedLayout, QuantizedTensor, register_layout_op
 
-# Lazy import state
-_nf4_available = None
-_nf4_functions = {}
+# Try to import bitsandbytes for efficient dequantization
+try:
+    import bitsandbytes.functional as bnb_F
+    _HAS_BNB = True
+except ImportError:
+    _HAS_BNB = False
+    logging.info("bitsandbytes not available for NF4Layout, using pure PyTorch fallback")
+
+# Standard NF4 codebook (from bitsandbytes)
+NF4_CODEBOOK = [
+    -1.0, -0.6961928009986877, -0.5250730514526367, -0.39491748809814453,
+    -0.28444138169288635, -0.18477343022823334, -0.09105003625154495, 0.0,
+    0.07958029955625534, 0.16093020141124725, 0.24611230194568634, 0.33791524171829224,
+    0.44070982933044434, 0.5626170039176941, 0.7229568362236023, 1.0,
+]
 
 
-def _check_nf4_available():
-    """Check and cache NF4 kernel availability."""
-    global _nf4_available, _nf4_functions
+def _dequantize_4bit_pytorch(qdata, absmax, block_size, shape, dtype, code=None):
+    """Pure PyTorch 4-bit dequantization.
     
-    if _nf4_available is not None:
-        return _nf4_available
+    Based on bitsandbytes _dequantize_4bit_impl:
+    1. Unpack nibbles (two 4-bit values per byte)
+    2. Use codebook lookup
+    3. Multiply by absmax scales per block
+    """
+    # Get codebook
+    if code is not None:
+        code_tensor = code.to(qdata.device).to(dtype)
+    else:
+        code_tensor = torch.tensor(NF4_CODEBOOK, device=qdata.device, dtype=dtype)
     
-    try:
-        from ..kernels.nf4_kernels import (
-            quantize_nf4,
-            dequantize_nf4,
-            QuantState4bit,
-            NF4_CODEBOOK,
-        )
-        _nf4_functions['quantize_nf4'] = quantize_nf4
-        _nf4_functions['dequantize_nf4'] = dequantize_nf4
-        _nf4_functions['QuantState4bit'] = QuantState4bit
-        _nf4_functions['NF4_CODEBOOK'] = NF4_CODEBOOK
-        _nf4_available = True
-        logging.info("NF4 kernels loaded successfully")
-    except ImportError as e:
-        _nf4_available = False
-        logging.info(f"NF4 kernels not available: {e}")
+    # Unpack nibbles
+    A = qdata.reshape(-1)
+    n_unpacked = A.size(0) * 2
+    out_indices = torch.empty(n_unpacked, dtype=torch.int32, device=qdata.device)
+    out_indices[::2] = (A >> 4).to(torch.int32)  # High nibble
+    out_indices[1::2] = (A & 0xF).to(torch.int32)  # Low nibble
     
-    return _nf4_available
-
-
-def _get_nf4_function(name):
-    """Get an NF4 function, raising helpful error if not available."""
-    if not _check_nf4_available():
-        raise RuntimeError(
-            f"NF4 kernels not available. "
-            f"Ensure the kernels/nf4_kernels.py file is present and has no import errors."
-        )
-    return _nf4_functions[name]
+    # Codebook lookup
+    out_dq = code_tensor[out_indices]
+    
+    # Trim to output size
+    n = shape.numel() if isinstance(shape, torch.Size) else torch.Size(shape).numel()
+    if out_dq.numel() > n:
+        out_dq = out_dq[:n]
+    
+    # Apply blockwise scales
+    absmax = absmax.to(qdata.device)
+    blocks = n // block_size
+    rem = n % block_size
+    has_rem = rem > 0
+    
+    out = torch.empty(n, dtype=dtype, device=qdata.device)
+    if blocks > 0:
+        out[:blocks * block_size] = (
+            out_dq[:blocks * block_size].view(-1, block_size) 
+            * absmax[:blocks].view(-1, 1)
+        ).reshape(-1)
+    if has_rem:
+        out[-rem:] = out_dq[-rem:] * absmax[-1]
+    
+    target_shape = shape if isinstance(shape, torch.Size) else torch.Size(shape)
+    return out.view(target_shape)
 
 
 class NF4Layout(QuantizedLayout):
@@ -62,16 +86,14 @@ class NF4Layout(QuantizedLayout):
     """
     
     @classmethod
-    def quantize(cls, tensor, block_size=64, compress_statistics=False, **kwargs) -> Tuple[torch.Tensor, Dict]:
+    def quantize(cls, tensor, block_size=64, **kwargs) -> Tuple[torch.Tensor, Dict]:
         """Quantize tensor to NF4 format."""
-        if not _check_nf4_available():
-            raise RuntimeError("NF4 kernels not available")
-        
-        quantize_nf4 = _get_nf4_function('quantize_nf4')
+        if not _HAS_BNB:
+            raise RuntimeError("NF4 quantization requires bitsandbytes")
         
         orig_dtype = tensor.dtype
         original_shape = tensor.shape
-        packed, quant_state = quantize_nf4(tensor, block_size, compress_statistics)
+        packed, quant_state = bnb_F.quantize_4bit(tensor, blocksize=block_size, quant_type='nf4')
         
         layout_params = {
             'absmax': quant_state.absmax,
@@ -79,28 +101,36 @@ class NF4Layout(QuantizedLayout):
             'orig_dtype': orig_dtype,
             'shape': original_shape,
             'quant_type': 'nf4',
-            'code': quant_state.code,
+            'code': quant_state.code if hasattr(quant_state, 'code') else None,
         }
         return packed, layout_params
     
     @staticmethod
-    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, **kwargs) -> torch.Tensor:
-        """Dequantize NF4 packed data back to float."""
-        if not _check_nf4_available():
-            raise RuntimeError("NF4 kernels not available")
+    def dequantize(qdata, absmax, block_size, orig_dtype, shape, code=None, quant_type='nf4', **kwargs) -> torch.Tensor:
+        """Dequantize NF4 packed data back to float.
         
-        dequantize_nf4 = _get_nf4_function('dequantize_nf4')
-        QuantState4bit = _get_nf4_function('QuantState4bit')
-        NF4_CODEBOOK = _get_nf4_function('NF4_CODEBOOK')
+        Uses bitsandbytes when available, pure PyTorch otherwise.
+        """
+        # Ensure shape is a proper Size object
+        if not isinstance(shape, torch.Size):
+            shape = torch.Size(shape)
         
-        if code is None:
-            code = NF4_CODEBOOK.to(qdata.device)
+        # Method 1: Try bitsandbytes (most efficient)
+        if _HAS_BNB:
+            try:
+                quant_state = bnb_F.QuantState(
+                    absmax=absmax.to(qdata.device),
+                    shape=shape,
+                    dtype=orig_dtype,
+                    blocksize=block_size,
+                    quant_type=quant_type,
+                )
+                return bnb_F.dequantize_4bit(qdata, quant_state, quant_type=quant_type)
+            except Exception as e:
+                logging.debug(f"bitsandbytes dequantize_4bit failed: {e}, falling back to PyTorch")
         
-        quant_state = QuantState4bit(
-            absmax=absmax, shape=shape, code=code,
-            blocksize=block_size, quant_type='nf4', dtype=orig_dtype,
-        )
-        return dequantize_nf4(qdata, quant_state, orig_dtype)
+        # Method 2: Pure PyTorch fallback
+        return _dequantize_4bit_pytorch(qdata, absmax, block_size, shape, orig_dtype, code)
     
     @classmethod
     def get_plain_tensors(cls, qtensor):
@@ -124,8 +154,11 @@ def nf4_linear(func, args, kwargs):
     weight = args[1]
     bias = args[2] if len(args) > 2 else None
     
+    # Dequantize weight
     if isinstance(weight, QuantizedTensor):
         weight = weight.dequantize()
+    
+    # Dequantize input if needed
     if isinstance(input_tensor, QuantizedTensor):
         input_tensor = input_tensor.dequantize()
     
