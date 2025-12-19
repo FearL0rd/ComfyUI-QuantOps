@@ -11,14 +11,16 @@ This module provides utilities to:
 """
 
 import torch
-import json
 import logging
+
+# Use the same tensor parsing as the rest of the codebase
+from .comfy_quant_helpers import tensor_to_dict
 
 
 def parse_quant_state(quant_state_tensor):
-    """Parse quant_state tensor (uint8 JSON) to dict."""
+    """Parse quant_state tensor (uint8 JSON) to dict using comfy_quant_helpers."""
     try:
-        return json.loads(quant_state_tensor.numpy().tobytes())
+        return tensor_to_dict(quant_state_tensor)
     except Exception as e:
         logging.debug(f"Failed to parse quant_state: {e}")
         return None
