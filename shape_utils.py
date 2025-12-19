@@ -41,13 +41,30 @@ def restore_shapes_for_detection(state_dict, prefix=""):
     
     # Find all quant_state tensors with shape info
     quant_states = {}
+    
+    # Debug: log all keys to understand structure
+    quant_state_keys = [k for k in state_dict.keys() if 'quant_state' in k.lower() or 'comfy_quant' in k.lower()]
+    if quant_state_keys:
+        logging.info(f"Shape restoration: Found {len(quant_state_keys)} quant_state/comfy_quant keys")
+        logging.debug(f"Sample keys: {quant_state_keys[:5]}")
+    
     for key in list(state_dict.keys()):
-        if '.quant_state.bitsandbytes__' in key or key.endswith('.quant_state.bitsandbytes__nf4') or key.endswith('.quant_state.bitsandbytes__fp4') or key.endswith('.quant_state.bitsandbytes__af4'):
+        # Check for legacy bitsandbytes format
+        if '.quant_state.bitsandbytes__' in key:
             # Extract layer prefix
             layer_prefix = key.split('.quant_state.')[0]
-            quant_state = parse_quant_state(state_dict[key])
-            if quant_state and 'shape' in quant_state:
-                quant_states[layer_prefix] = quant_state
+            try:
+                quant_state = parse_quant_state(state_dict[key])
+                if quant_state:
+                    logging.debug(f"Parsed quant_state for {layer_prefix}: keys={list(quant_state.keys())}")
+                    if 'shape' in quant_state:
+                        # Validate shape is list/tuple of ints
+                        shape = quant_state['shape']
+                        if isinstance(shape, (list, tuple)) and len(shape) >= 1:
+                            quant_states[layer_prefix] = quant_state
+                            logging.debug(f"Found shape {shape} for {layer_prefix}")
+            except Exception as e:
+                logging.debug(f"Failed to parse quant_state {key}: {e}")
     
     # Also check comfy_quant for shape info
     for key in list(state_dict.keys()):
@@ -55,10 +72,17 @@ def restore_shapes_for_detection(state_dict, prefix=""):
             layer_prefix = key[:-len('.comfy_quant')]
             try:
                 comfy_quant = parse_quant_state(state_dict[key])
-                if comfy_quant and 'shape' in comfy_quant:
-                    quant_states[layer_prefix] = comfy_quant
-            except:
-                pass
+                if comfy_quant:
+                    logging.debug(f"Parsed comfy_quant for {layer_prefix}: keys={list(comfy_quant.keys())}")
+                    if 'shape' in comfy_quant:
+                        shape = comfy_quant['shape']
+                        if isinstance(shape, (list, tuple)) and len(shape) >= 1:
+                            quant_states[layer_prefix] = comfy_quant
+                            logging.debug(f"Found shape {shape} for {layer_prefix} (comfy_quant)")
+            except Exception as e:
+                logging.debug(f"Failed to parse comfy_quant {key}: {e}")
+    
+    logging.info(f"Shape restoration: Found {len(quant_states)} layers with valid shape info")
     
     # Process all keys
     for key in state_dict.keys():
@@ -70,13 +94,26 @@ def restore_shapes_for_detection(state_dict, prefix=""):
             if layer_prefix in quant_states:
                 orig_shape = quant_states[layer_prefix].get('shape')
                 if orig_shape:
-                    # Store original packed weight for later
-                    shape_info[key] = value
-                    # Create proxy tensor with original shape
-                    proxy = torch.zeros(orig_shape, dtype=torch.bfloat16)
-                    processed_sd[key] = proxy
-                    logging.debug(f"Shape restoration: {key} {value.shape} -> {orig_shape}")
-                    continue
+                    try:
+                        # Validate shape is proper format
+                        if not isinstance(orig_shape, (list, tuple)):
+                            logging.warning(f"Invalid shape type for {key}: {type(orig_shape)}")
+                            processed_sd[key] = value
+                            continue
+                        if len(orig_shape) < 1:
+                            logging.warning(f"Empty shape for {key}")
+                            processed_sd[key] = value
+                            continue
+                        
+                        # Store original packed weight for later
+                        shape_info[key] = value
+                        # Create proxy tensor with original shape
+                        proxy = torch.zeros(list(orig_shape), dtype=torch.bfloat16)
+                        processed_sd[key] = proxy
+                        logging.debug(f"Shape restoration: {key} {value.shape} -> {orig_shape}")
+                        continue
+                    except Exception as e:
+                        logging.warning(f"Failed to create proxy for {key} with shape {orig_shape}: {e}")
         
         processed_sd[key] = value
     
