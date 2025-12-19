@@ -9,6 +9,7 @@ These nodes provide custom model loading with:
 
 import os
 import logging
+import torch
 import folder_paths
 import comfy.sd
 import comfy.utils
@@ -206,35 +207,32 @@ class QuantizedUNETLoader:
                     else:
                         logging.info(f"QuantizedUNETLoader: Detected model config: {type(model_config).__name__}")
                         
-                        # Now prepare actual state_dict for loading (with packed weights)
-                        loading_sd = comfy.utils.state_dict_prefix_replace(sd, {diffusion_model_prefix: ""}, filter_keys=True)
-                        if len(loading_sd) == 0:
-                            loading_sd = sd
+                        # Prepare state_dict for loading (with packed weights)
+                        # Use filter_keys=False to preserve quant metadata keys like absmax, quant_map, quant_state
+                        loading_sd = comfy.utils.state_dict_prefix_replace(sd, {diffusion_model_prefix: ""}, filter_keys=False)
                         
                         # Set up model config with our custom operations
                         if model_options.get("custom_operations"):
                             model_config.custom_operations = model_options["custom_operations"]
+                            logging.info(f"QuantizedUNETLoader: Using custom operations: {model_options['custom_operations']}")
                         
                         # Configure dtype and device
                         load_device = comfy.model_management.get_torch_device()
                         offload_device = comfy.model_management.unet_offload_device()
-                        parameters = comfy.utils.calculate_parameters(loading_sd)
                         
-                        unet_dtype = model_options.get("dtype", None)
-                        if unet_dtype is None:
-                            unet_dtype = comfy.model_management.unet_dtype(
-                                model_params=parameters, 
-                                supported_dtypes=list(model_config.supported_inference_dtypes)
-                            )
+                        # For 4-bit, we don't care about parameter size calculation
+                        unet_dtype = model_options.get("dtype", torch.bfloat16)
                         
                         manual_cast_dtype = comfy.model_management.unet_manual_cast(
                             unet_dtype, load_device, model_config.supported_inference_dtypes
                         )
                         model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
                         
-                        # Build model and load weights
+                        # Build model with custom operations
                         model = model_config.get_model(loading_sd, "")
                         model = model.to(offload_device)
+                        
+                        # Load weights - this should trigger _load_from_state_dict for each Linear
                         model.load_model_weights(loading_sd, "")
                         
                         model_patcher = comfy.model_patcher.ModelPatcher(
