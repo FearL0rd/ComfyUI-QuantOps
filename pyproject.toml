@@ -1,16 +1,16 @@
 [project]
-name = "comfyui-quantops"
-version = "0.9.0"
+name = "ComfyUI-QuantOps"
 description = "Extended quantization layouts for ComfyUI (INT8, row/block-wise FP8)"
+version = "1.0.0"
 readme = "README.md"
-license = {text = "MIT"}
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [
     {name = "silveroxides"}
 ]
 keywords = ["comfyui", "quantization", "fp8", "int8", "ai", "inference"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -22,8 +22,12 @@ classifiers = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/silveroxides/ComfyUI-QuantOps"
-"Bug Tracker" = "https://github.com/silveroxides/ComfyUI-QuantOps/issues"
+Repository = "https://github.com/silveroxides/ComfyUI-QuantOps"
+
+[tool.comfy]
+PublisherId = "silveroxides"
+DisplayName = "QuantOps"
+Icon = "https://github.com/silveroxides/ComfyUI-QuantOps/raw/refs/heads/main/assets/net-icon.png"
 
 [build-system]
 requires = ["setuptools>=61.0"]
