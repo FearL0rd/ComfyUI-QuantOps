@@ -1,14 +1,14 @@
 [project]
 name = "comfyui-quantops"
 version = "0.1.0"
-description = "Extended quantization layouts for ComfyUI (INT8, NF4, FP4, row/block-wise FP8)"
+description = "Extended quantization layouts for ComfyUI (INT8, row/block-wise FP8)"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "silveroxides"}
 ]
-keywords = ["comfyui", "quantization", "fp8", "int8", "nf4", "fp4", "ai", "inference"]
+keywords = ["comfyui", "quantization", "fp8", "int8", "ai", "inference"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
