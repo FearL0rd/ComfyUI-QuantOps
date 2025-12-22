@@ -39,6 +39,18 @@ Use the **QuantizedModelLoader** node to load models created by `convert_to_quan
 
 2. Place the output in your ComfyUI models/checkpoints folder
 
+### Text Encoder Loading
+
+Use the **Load CLIP (Quantized)** node for INT8-quantized text encoders:
+
+1. Quantize your text encoder (CLIP, T5, etc.):
+   ```bash
+   convert_to_quant -i t5xxl.safetensors --int8 --comfy_quant --simple --block_size 128
+   ```
+
+2. Place the output in `ComfyUI/models/text_encoders/`
+3. Select the appropriate type (e.g., `sd3` or `flux` for T5-XXL)
+
 
 ## License
 
