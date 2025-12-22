@@ -202,6 +202,8 @@ class QuantizedCLIPLoader:
         "hunyuan_image",
         "flux",
         "hunyuan_video",
+        "flux2",
+        "ovis",
     ]
 
     @classmethod
