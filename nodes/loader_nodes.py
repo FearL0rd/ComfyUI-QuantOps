@@ -175,13 +175,111 @@ class QuantizedUNETLoader:
         return (model,)
 
 
+class QuantizedCLIPLoader:
+    """
+    Load CLIP/text encoders with INT8 blockwise quantization.
+
+    Supports text encoders quantized by convert_to_quant with --int8 --comfy_quant.
+    """
+
+    # CLIPType options matching built-in CLIPLoader from nodes.py
+    CLIP_TYPES = [
+        "stable_diffusion",
+        "stable_cascade",
+        "sd3",
+        "stable_audio",
+        "mochi",
+        "ltxv",
+        "pixart",
+        "cosmos",
+        "lumina2",
+        "wan",
+        "hidream",
+        "chroma",
+        "ace",
+        "omnigen2",
+        "qwen_image",
+        "hunyuan_image",
+        "flux",
+        "hunyuan_video",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip_name": (folder_paths.get_filename_list("text_encoders"),),
+                "type": (cls.CLIP_TYPES,),
+                "kernel_backend": (["pytorch", "triton"],),
+            },
+        }
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Load INT8-quantized text encoders (CLIP, T5, etc.)"
+
+    def load_clip(self, clip_name, type, kernel_backend):
+        """Load a CLIP/text encoder with INT8 quantization support."""
+        import comfy.model_management
+
+        # Configure INT8 kernel backend
+        try:
+            from ..quant_layouts.int8_layout import BlockWiseINT8Layout
+
+            BlockWiseINT8Layout.set_backend(kernel_backend)
+            logging.debug(
+                f"QuantizedCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
+            )
+        except Exception as e:
+            if kernel_backend == "triton":
+                logging.warning(f"Failed to configure Triton backend: {e}")
+
+        # Get clip path
+        clip_path = folder_paths.get_full_path("text_encoders", clip_name)
+
+        # Convert type string to CLIPType enum
+        clip_type = getattr(
+            comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
+        )
+
+        # Load state dict
+        sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
+
+        # Set up model options with our custom INT8 ops
+        model_options = {
+            "initial_device": comfy.model_management.text_encoder_offload_device()
+        }
+        try:
+            from ..int8_ops import HybridINT8Ops
+
+            model_options["custom_operations"] = HybridINT8Ops
+            logging.info(
+                "QuantizedCLIPLoader: Using HybridINT8Ops for INT8 text encoder"
+            )
+        except ImportError as e:
+            logging.warning(f"HybridINT8Ops not available: {e}")
+
+        # Load text encoder using ComfyUI's API
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            state_dicts=[sd],
+            clip_type=clip_type,
+            model_options=model_options,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+
+        return (clip,)
+
+
 # ComfyUI node registration
 NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
     "QuantizedUNETLoader": QuantizedUNETLoader,
+    "QuantizedCLIPLoader": QuantizedCLIPLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedModelLoader": "Load Checkpoint (Quantized)",
     "QuantizedUNETLoader": "Load Diffusion Model (Quantized)",
+    "QuantizedCLIPLoader": "Load CLIP (Quantized)",
 }
