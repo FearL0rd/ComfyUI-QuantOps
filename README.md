@@ -43,3 +43,8 @@ Use the **QuantizedModelLoader** node to load models created by `convert_to_quan
 ## License
 
 MIT License
+
+## Acknowledgements
+
+- [lyogavin](https://github.com/lyogavin) for [PR #10864](https://github.com/comfyanonymous/ComfyUI/pull/10864) to ComfyUI.
+- [Clybius](https://github.com/Clybius) for inspiring me to take on quantization and his [Learned-Rounding](https://github.com/Clybius/Learned-Rounding) repository.
