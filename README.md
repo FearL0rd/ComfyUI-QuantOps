@@ -6,12 +6,10 @@ Extended quantization layouts for ComfyUI, enabling loading and inference with m
 
 | Format | Layout | Description |
 |--------|--------|-------------|
-| FP8 (tensor-wise) | `TensorCoreFP8Layout` | Standard FP8 with tensor-wise scaling |
-| FP8 (row-wise) | `RowWiseFP8Layout` | Per-row FP8 scaling |
-| FP8 (block-wise) | `BlockWiseFP8Layout` | 2D block-wise FP8 scaling |
-| INT8 (block-wise) | `BlockWiseINT8Layout` | Block-wise INT8 with Triton kernels |
-| NF4 | `NF4Layout` | 4-bit normal float (bitsandbytes-compatible) |
-| FP4 | `FP4Layout` | 4-bit floating point |
+| FP8 (tensor-wise) | `TensorCoreFP8Layout` | Standard FP8 with tensor-wise scaling | Supported |
+| FP8 (row-wise) | `RowWiseFP8Layout` | Per-row FP8 scaling | WIP |
+| FP8 (block-wise) | `BlockWiseFP8Layout` | 2D block-wise FP8 scaling | WIP |
+| INT8 (block-wise) | `BlockWiseINT8Layout` | Block-wise INT8 with Triton kernels | Supported |
 
 ## Installation
 
@@ -34,16 +32,13 @@ Extended quantization layouts for ComfyUI, enabling loading and inference with m
 
 Use the **QuantizedModelLoader** node to load models created by `convert_to_quant`:
 
-1. Quantize your model with convert_to_quant:
+1. Quantize your model with [convert_to_quant](https://github.com/silveroxides/convert_to_quant):
    ```bash
-   convert_to_quant -i model.safetensors --int8 --comfy_quant
+   convert_to_quant -i model.safetensors --int8 --comfy_quant --simple --block_size 128
    ```
 
 2. Place the output in your ComfyUI models/checkpoints folder
 
-3. Use QuantizedModelLoader node with:
-   - `quant_format`: Select the format matching your model
-   - `kernel_backend`: Choose "pytorch" (always works) or "triton" (faster, requires installation)
 
 ## License
 
