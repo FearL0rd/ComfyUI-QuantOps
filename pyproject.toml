@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-quantops"
-version = "0.1.0"
+version = "0.9.0"
 description = "Extended quantization layouts for ComfyUI (INT8, row/block-wise FP8)"
 readme = "README.md"
 license = {text = "MIT"}
