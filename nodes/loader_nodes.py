@@ -26,7 +26,7 @@ class QuantizedModelLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "quant_format": (["auto", "int8"],),
+                "quant_format": (["auto", "int8", "fp8"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
             "optional": {
@@ -43,7 +43,7 @@ class QuantizedModelLoader:
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load checkpoints with custom quantization support (INT8, FP8 variants). Select quant_format to match your model."
+    DESCRIPTION = "Load checkpoints with custom quantization support (INT8, FP8 blockwise/rowwise). Select quant_format to match your model."
 
     def load_checkpoint(
         self, ckpt_name, quant_format, kernel_backend, force_dequant=False
@@ -78,6 +78,16 @@ class QuantizedModelLoader:
                 )
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
+        elif quant_format == "fp8":
+            try:
+                from ..fp8_ops import HybridFP8Ops
+
+                model_options = {"custom_operations": HybridFP8Ops}
+                logging.info(
+                    "QuantizedModelLoader: Using HybridFP8Ops for FP8 blockwise/rowwise models"
+                )
+            except ImportError as e:
+                logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
             # Try INT8 as fallback
             try:
@@ -121,7 +131,7 @@ class QuantizedUNETLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "quant_format": (["auto", "int8"],),
+                "quant_format": (["auto", "int8", "fp8"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -129,7 +139,7 @@ class QuantizedUNETLoader:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load diffusion models with custom quantization support. Select quant_format to match your model."
+    DESCRIPTION = "Load diffusion models with custom quantization support (INT8, FP8 blockwise/rowwise). Select quant_format to match your model."
 
     def load_unet(self, unet_name, quant_format, kernel_backend):
         """Load a UNET model with the specified settings."""
@@ -160,6 +170,16 @@ class QuantizedUNETLoader:
                 logging.info("QuantizedUNETLoader: Using HybridINT8Ops for INT8 models")
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
+        elif quant_format == "fp8":
+            try:
+                from ..fp8_ops import HybridFP8Ops
+
+                model_options = {"custom_operations": HybridFP8Ops}
+                logging.info(
+                    "QuantizedUNETLoader: Using HybridFP8Ops for FP8 blockwise/rowwise models"
+                )
+            except ImportError as e:
+                logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
             try:
                 from ..int8_ops import HybridINT8Ops
@@ -169,7 +189,7 @@ class QuantizedUNETLoader:
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 
-        # Standard loading path (works for INT8 and non-quantized)
+        # Standard loading path
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
 
         return (model,)
