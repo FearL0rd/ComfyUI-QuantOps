@@ -301,25 +301,11 @@ class BlockWiseINT8Layout(QuantizedLayout):
 
 # Call counters to avoid log spam
 _int8_path_counts = {"NATIVE_TRITON": 0, "PYTORCH_BOTH_QUANT": 0, "DEQUANT_FALLBACK": 0}
-_LOG_LIMIT = 5  # Log first N occurrences per path
-
-
-def _is_verbose():
-    """Check if ComfyUI was started with --verbose DEBUG for detailed INT8 path logging."""
-    try:
-        import comfy.cli_args
-
-        return comfy.cli_args.args.verbose == "DEBUG"
-    except (ImportError, AttributeError):
-        # Fallback: check environment variable
-        return os.environ.get("QUANTOPS_DEBUG", "0") == "1"
+_LOG_LIMIT = 3  # Log first N occurrences per path, then summary
 
 
 def _log_int8_path(path_type, input_shape, weight_shape, reason=None):
-    """Log which INT8 code path is being used (only when --verbose, limited to avoid spam)."""
-    if not _is_verbose():
-        return
-
+    """Log which INT8 code path is being used (always, but rate-limited)."""
     global _int8_path_counts
 
     count = _int8_path_counts.get(path_type, 0)
@@ -337,7 +323,7 @@ def _log_int8_path(path_type, input_shape, weight_shape, reason=None):
         elif path_type == "DEQUANT_FALLBACK":
             logging.warning(
                 f"INT8: Dequant fallback ({reason}) - input={input_shape}, weight={weight_shape}. "
-                f"Native INT8 matmul NOT used."
+                f"Native INT8 matmul NOT used - only memory savings, no compute speedup."
             )
     elif count == _LOG_LIMIT:
         logging.info(
