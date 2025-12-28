@@ -7,9 +7,11 @@ ComfyUI_Hybrid-Scaled_fp8-Loader handles FP8 format conversion.
 """
 
 import torch
+import torch.nn.functional as F
 import logging
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
 from comfy.quant_ops import QuantizedTensor, LAYOUTS
+from comfy.model_patcher import LowVramPatch
 
 # Try to import our INT8 layout
 try:
@@ -220,14 +222,149 @@ class HybridINT8Ops(manual_cast):
             uncast_bias_weight(self, weight, bias, offload_stream)
             return out
         
+        def forward_fused_lora(self, input):
+            """
+            Memory-efficient LoRA forward pass.
+            
+            Computes: output = base_int8_matmul(x, W) + lora_contribution(x)
+            
+            Instead of dequantizing the full weight, we:
+            1. Run native INT8 matmul for base (uses dynamic activation quant)
+            2. Compute LoRA contribution separately: x @ B.T @ A.T * scale
+            3. Sum the results
+            
+            This avoids materializing the full bf16 weight tensor.
+            """
+            weight = self.weight
+            if isinstance(weight, torch.nn.Parameter):
+                weight = weight.data
+            
+            input_dtype = input.dtype
+            
+            # 1. Base INT8 output (no LoRA applied, uses dynamic activation quant)
+            if isinstance(weight, QuantizedTensor):
+                # Move to input device if needed
+                if weight.device != input.device:
+                    weight = weight.to(device=input.device)
+                
+                # Update orig_dtype for proper output casting
+                if hasattr(weight, '_layout_params'):
+                    weight._layout_params['orig_dtype'] = input_dtype
+                
+                # Dispatch to int8_linear handler (uses dynamic act quant now)
+                base_out = torch.nn.functional.linear(input, weight, None)
+            elif self.is_quantized and weight.dtype == torch.int8:
+                # Fallback for raw INT8 without QuantizedTensor wrapper
+                weight = weight.to(device=input.device)
+                if self.scale_weight is not None:
+                    scale = self.scale_weight.to(device=input.device)
+                    weight_dequant = self._dequantize_weight(weight, scale, input_dtype)
+                else:
+                    weight_dequant = weight.to(input_dtype)
+                base_out = F.linear(input, weight_dequant, None)
+            else:
+                # Non-quantized fallback
+                base_out = F.linear(input.to(weight.dtype), weight, None)
+            
+            # 2. Compute LoRA contributions separately
+            lora_out = None
+            for patch_fn in self.weight_function:
+                if isinstance(patch_fn, LowVramPatch):
+                    # Extract patches for this layer
+                    patches = patch_fn.patches.get(patch_fn.key, [])
+                    for patch_data in patches:
+                        # patch_data: (strength_patch, adapter, strength_model, offset, function)
+                        strength_patch = patch_data[0]
+                        adapter = patch_data[1]
+                        strength_model = patch_data[2]
+                        
+                        # Check if adapter has weights (LoRA-style adapters)
+                        if hasattr(adapter, 'weights') and adapter.weights is not None:
+                            weights = adapter.weights
+                            # weights[0] = mat1 (lora_up), weights[1] = mat2 (lora_down), weights[2] = alpha
+                            mat1 = weights[0]  # [out_dim, rank]
+                            mat2 = weights[1]  # [rank, in_dim]
+                            alpha = weights[2] if weights[2] is not None else 1.0
+                            rank = mat2.shape[0]
+                            scale = strength_patch * strength_model * (alpha / rank)
+                            
+                            # Move to device
+                            mat1 = mat1.to(device=input.device, dtype=input_dtype)
+                            mat2 = mat2.to(device=input.device, dtype=input_dtype)
+                            
+                            # Compute: x @ mat2.T @ mat1.T * scale
+                            # input: [B, seq, in_dim], mat2: [rank, in_dim], mat1: [out_dim, rank]
+                            temp = F.linear(input, mat2)  # [B, seq, rank]
+                            lora_contrib = F.linear(temp, mat1) * scale  # [B, seq, out_dim]
+                            
+                            if lora_out is None:
+                                lora_out = lora_contrib
+                            else:
+                                lora_out = lora_out + lora_contrib
+                        else:
+                            # Fallback for non-LoRA adapters: apply the patch function to dequantized weight
+                            # This is memory-heavy but ensures correctness
+                            logging.warning(f"INT8 Fused LoRA: Falling back to dequant for non-LoRA adapter")
+                            if isinstance(self.weight.data, QuantizedTensor):
+                                weight_fp = self.weight.data.dequantize().to(input.device)
+                            else:
+                                weight_fp = self._dequantize_weight(
+                                    self.weight.data.to(input.device),
+                                    self.scale_weight.to(input.device) if self.scale_weight is not None else None,
+                                    input_dtype
+                                )
+                            patched_weight = patch_fn(weight_fp)
+                            # Compute the delta contribution
+                            lora_contrib = F.linear(input, patched_weight - weight_fp, None)
+                            if lora_out is None:
+                                lora_out = lora_contrib
+                            else:
+                                lora_out = lora_out + lora_contrib
+                else:
+                    # Non-LowVramPatch function - fall back to calling it
+                    logging.warning(f"INT8 Fused LoRA: Unknown patch function type, falling back")
+                    if isinstance(self.weight.data, QuantizedTensor):
+                        weight_fp = self.weight.data.dequantize().to(input.device)
+                    else:
+                        weight_fp = self._dequantize_weight(
+                            self.weight.data.to(input.device),
+                            self.scale_weight.to(input.device) if self.scale_weight is not None else None,
+                            input_dtype
+                        )
+                    patched_weight = patch_fn(weight_fp)
+                    lora_contrib = F.linear(input, patched_weight - weight_fp, None)
+                    if lora_out is None:
+                        lora_out = lora_contrib
+                    else:
+                        lora_out = lora_out + lora_contrib
+            
+            # 3. Combine base + LoRA
+            out = base_out
+            if lora_out is not None:
+                out = out + lora_out
+            
+            # Add bias
+            if self.bias is not None:
+                bias = self.bias.to(device=input.device, dtype=input_dtype)
+                out = out + bias
+            
+            return out
+        
         def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
+            weight = self.weight
+            if isinstance(weight, torch.nn.Parameter):
+                weight = weight.data
+            
+            # Check if we have LoRA patches AND quantized weight
+            has_lora = len(self.weight_function) > 0
+            is_quant = isinstance(weight, QuantizedTensor) or (self.is_quantized and weight.dtype == torch.int8)
+            
+            if has_lora and is_quant:
+                # Use fused LoRA path to avoid full weight dequantization
+                return self.forward_fused_lora(*args, **kwargs)
+            elif self.comfy_cast_weights or has_lora or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
-                weight = self.weight
-                if isinstance(weight, torch.nn.Parameter):
-                    weight = weight.data
-                
                 # INT8 needs our special forward path
                 if weight.dtype == torch.int8 or isinstance(weight, QuantizedTensor):
                     return self.forward_comfy_cast_weights(*args, **kwargs)
