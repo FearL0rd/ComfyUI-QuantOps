@@ -300,7 +300,7 @@ class BlockWiseINT8Layout(QuantizedLayout):
 # ==============================================================================
 
 # Call counters to avoid log spam
-_int8_path_counts = {"NATIVE_TRITON": 0, "PYTORCH_BOTH_QUANT": 0, "DEQUANT_FALLBACK": 0}
+_int8_path_counts = {"NATIVE_TRITON": 0, "PYTORCH_BOTH_QUANT": 0, "DEQUANT_FALLBACK": 0, "DYNAMIC_ACT_QUANT": 0}
 _LOG_LIMIT = 3  # Log first N occurrences per path, then summary
 
 
@@ -319,6 +319,10 @@ def _log_int8_path(path_type, input_shape, weight_shape, reason=None):
         elif path_type == "PYTORCH_BOTH_QUANT":
             logging.info(
                 f"INT8: PyTorch fallback (both quantized) - input={input_shape}, weight={weight_shape}"
+            )
+        elif path_type == "DYNAMIC_ACT_QUANT":
+            logging.info(
+                f"INT8: Dynamic activation quant - input={input_shape}, weight={weight_shape}"
             )
         elif path_type == "DEQUANT_FALLBACK":
             logging.warning(
@@ -436,8 +440,85 @@ def int8_linear(func, args, kwargs):
             output = output.to(out_dtype)
         return output
 
-    # Case 2: Fallback - dequantize and use standard linear
-    # This is the common path when only weights are quantized (activations are not)
+    # Case 2: Weight is quantized, input is NOT - dynamically quantize input
+    if isinstance(weight, QuantizedTensor) and not isinstance(input_tensor, QuantizedTensor):
+        b_int8, b_scale, b_block_size, _ = BlockWiseINT8Layout.get_plain_tensors(weight)
+        out_dtype = weight._layout_params.get("orig_dtype", input_tensor.dtype)
+        
+        # Ensure input is contiguous and on same device
+        if not input_tensor.is_contiguous():
+            input_tensor = input_tensor.contiguous()
+        if input_tensor.device != b_int8.device:
+            input_tensor = input_tensor.to(b_int8.device)
+        
+        # Dynamically quantize input activation to INT8
+        orig_shape = input_tensor.shape
+        K = input_tensor.shape[-1]
+        
+        # Check if K is divisible by block_size, pad if needed
+        if K % b_block_size != 0:
+            # Fall back to dequant if dimensions don't align
+            _log_int8_path(
+                "DEQUANT_FALLBACK",
+                input_tensor.shape,
+                b_int8.shape,
+                reason=f"K={K} not divisible by block_size={b_block_size}"
+            )
+            weight_dequant = weight.dequantize()
+            return torch.nn.functional.linear(input_tensor, weight_dequant, bias)
+        
+        # Quantize activation on-the-fly
+        a_int8, a_layout_params = BlockWiseINT8Layout.quantize(
+            input_tensor,
+            block_size=b_block_size,
+            is_weight=False
+        )
+        a_scale = a_layout_params["scale"]
+        
+        _log_int8_path("DYNAMIC_ACT_QUANT", a_int8.shape, b_int8.shape)
+        
+        # Try Triton path
+        if BlockWiseINT8Layout.use_triton and a_int8.is_cuda:
+            try:
+                int8_addmm = (
+                    _get_triton_function("int8_addmm")
+                    if bias is not None
+                    else _get_triton_function("int8_gemm")
+                )
+                a_2d = a_int8.reshape(-1, a_int8.shape[-1]).contiguous()
+                a_scale_2d = a_scale.reshape(-1, a_scale.shape[-1]).contiguous()
+
+                if bias is not None:
+                    result = int8_addmm(
+                        a_2d,
+                        a_scale_2d,
+                        b_int8.contiguous(),
+                        b_scale.contiguous(),
+                        bias,
+                    )
+                else:
+                    result = _get_triton_function("int8_gemm")(
+                        a_2d, a_scale_2d, b_int8.contiguous(), b_scale.contiguous()
+                    )
+
+                if result.dtype != out_dtype:
+                    result = result.to(out_dtype)
+
+                return result.reshape(*orig_shape[:-1], weight.shape[0])
+            except Exception as e:
+                logging.warning(
+                    f"Triton INT8 matmul failed: {e}, using PyTorch fallback"
+                )
+        
+        # PyTorch fallback for dynamic quant path
+        output = _int8_gemm_pytorch_fallback(
+            a_int8, a_scale, b_int8, b_scale, b_block_size, bias
+        )
+        if output.dtype != out_dtype:
+            output = output.to(out_dtype)
+        return output.reshape(*orig_shape[:-1], weight.shape[0])
+
+    # Case 3: Fallback - dequantize (rare - usually one of above cases applies)
     _log_int8_path(
         "DEQUANT_FALLBACK",
         input_tensor.shape if hasattr(input_tensor, "shape") else None,
@@ -446,9 +527,7 @@ def int8_linear(func, args, kwargs):
         else weight._qdata.shape
         if isinstance(weight, QuantizedTensor)
         else None,
-        reason="input not quantized"
-        if not isinstance(input_tensor, QuantizedTensor)
-        else "weight not quantized",
+        reason="unexpected case",
     )
 
     if isinstance(weight, QuantizedTensor):
