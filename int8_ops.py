@@ -241,6 +241,13 @@ class HybridINT8Ops(manual_cast):
             
             input_dtype = input.dtype
             
+            # Log that we're using fused LoRA path (only first few times)
+            if not hasattr(HybridINT8Ops.Linear, '_fused_lora_log_count'):
+                HybridINT8Ops.Linear._fused_lora_log_count = 0
+            if HybridINT8Ops.Linear._fused_lora_log_count < 3:
+                logging.info(f"INT8: Using fused LoRA path - input={input.shape}, weight={weight.shape if hasattr(weight, 'shape') else weight._qdata.shape}")
+                HybridINT8Ops.Linear._fused_lora_log_count += 1
+            
             # 1. Base INT8 output (no LoRA applied, uses dynamic activation quant)
             if isinstance(weight, QuantizedTensor):
                 # Move to input device if needed
