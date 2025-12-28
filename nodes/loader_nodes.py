@@ -124,6 +124,21 @@ class QuantizedModelLoader:
         clip = out[1]
         vae = out[2]
 
+        # Adjust memory_usage_factor for quantized models
+        # Quantized weights use ~1 byte (INT8/FP8) vs 2 bytes (bf16/fp16)
+        # This prevents ComfyUI from over-estimating memory requirements
+        if model is not None and quant_format != "auto":
+            try:
+                original_factor = model.model.memory_usage_factor
+                # INT8/FP8 weights are ~2x smaller than fp16/bf16
+                model.model.memory_usage_factor = original_factor / 2.0
+                logging.info(
+                    f"QuantizedModelLoader: Adjusted memory_usage_factor from "
+                    f"{original_factor:.2f} to {model.model.memory_usage_factor:.2f}"
+                )
+            except AttributeError:
+                logging.debug("Could not adjust memory_usage_factor")
+
         # Force dequantize if requested (useful for debugging)
         if force_dequant and model is not None:
             logging.info("QuantizedModelLoader: Force dequantizing model weights")
@@ -215,6 +230,19 @@ class QuantizedUNETLoader:
 
         # Standard loading path
         model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+
+        # Adjust memory_usage_factor for quantized models
+        # Quantized weights use ~1 byte (INT8/FP8) vs 2 bytes (bf16/fp16)
+        if model is not None and quant_format != "auto":
+            try:
+                original_factor = model.model.memory_usage_factor
+                model.model.memory_usage_factor = original_factor / 2.0
+                logging.info(
+                    f"QuantizedUNETLoader: Adjusted memory_usage_factor from "
+                    f"{original_factor:.2f} to {model.model.memory_usage_factor:.2f}"
+                )
+            except AttributeError:
+                logging.debug("Could not adjust memory_usage_factor")
 
         return (model,)
 
