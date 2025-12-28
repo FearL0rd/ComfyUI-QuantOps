@@ -19,6 +19,11 @@ class QuantizedModelLoader:
 
     Supports models quantized by convert_to_quant (with or without --comfy_quant flag).
     Automatically handles legacy scale_weight -> weight_scale conversion.
+    
+    FP8 Modes:
+    - float8_e4m3fn: Standard tensor-scaled FP8 (uses ComfyUI built-in handling)
+    - float8_e4m3fn_blockwise: Block-wise scaled FP8 (uses HybridFP8Ops)
+    - float8_e4m3fn_rowwise: Row-wise scaled FP8 (uses HybridFP8Ops)
     """
 
     @classmethod
@@ -26,7 +31,7 @@ class QuantizedModelLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "quant_format": (["auto", "int8", "fp8"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
             "optional": {
@@ -43,7 +48,8 @@ class QuantizedModelLoader:
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load checkpoints with custom quantization support (INT8, FP8 blockwise/rowwise). Select quant_format to match your model."
+    DESCRIPTION = "Load checkpoints with custom quantization support. float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
+
 
     def load_checkpoint(
         self, ckpt_name, quant_format, kernel_backend, force_dequant=False
@@ -78,18 +84,25 @@ class QuantizedModelLoader:
                 )
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
-        elif quant_format == "fp8":
+        elif quant_format == "float8_e4m3fn":
+            # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
+            # No custom ops needed, TensorCoreFP8Layout handles it correctly
+            logging.info(
+                "QuantizedModelLoader: Using ComfyUI built-in for tensor-scaled FP8"
+            )
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"):
+            # Block-wise or row-wise FP8 - use HybridFP8Ops for per-block/row scales
             try:
                 from ..fp8_ops import HybridFP8Ops
 
                 model_options = {"custom_operations": HybridFP8Ops}
                 logging.info(
-                    "QuantizedModelLoader: Using HybridFP8Ops for FP8 blockwise/rowwise models"
+                    f"QuantizedModelLoader: Using HybridFP8Ops for {quant_format} models"
                 )
             except ImportError as e:
                 logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
-            # Try INT8 as fallback
+            # Try INT8 as fallback for auto mode
             try:
                 from ..int8_ops import HybridINT8Ops
 
@@ -124,6 +137,11 @@ class QuantizedUNETLoader:
     Load UNET/diffusion models with custom quantization layouts.
 
     Handles legacy scale_weight format automatically.
+    
+    FP8 Modes:
+    - float8_e4m3fn: Standard tensor-scaled FP8 (uses ComfyUI built-in handling)
+    - float8_e4m3fn_blockwise: Block-wise scaled FP8 (uses HybridFP8Ops)
+    - float8_e4m3fn_rowwise: Row-wise scaled FP8 (uses HybridFP8Ops)
     """
 
     @classmethod
@@ -131,7 +149,7 @@ class QuantizedUNETLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "quant_format": (["auto", "int8", "fp8"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -139,7 +157,7 @@ class QuantizedUNETLoader:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load diffusion models with custom quantization support (INT8, FP8 blockwise/rowwise). Select quant_format to match your model."
+    DESCRIPTION = "Load diffusion models with custom quantization support. float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
 
     def load_unet(self, unet_name, quant_format, kernel_backend):
         """Load a UNET model with the specified settings."""
@@ -170,13 +188,19 @@ class QuantizedUNETLoader:
                 logging.info("QuantizedUNETLoader: Using HybridINT8Ops for INT8 models")
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
-        elif quant_format == "fp8":
+        elif quant_format == "float8_e4m3fn":
+            # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
+            logging.info(
+                "QuantizedUNETLoader: Using ComfyUI built-in for tensor-scaled FP8"
+            )
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"):
+            # Block-wise or row-wise FP8 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
                 model_options = {"custom_operations": HybridFP8Ops}
                 logging.info(
-                    "QuantizedUNETLoader: Using HybridFP8Ops for FP8 blockwise/rowwise models"
+                    f"QuantizedUNETLoader: Using HybridFP8Ops for {quant_format} models"
                 )
             except ImportError as e:
                 logging.warning(f"HybridFP8Ops not available: {e}")

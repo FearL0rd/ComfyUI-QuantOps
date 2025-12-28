@@ -4,12 +4,12 @@ Extended quantization layouts for ComfyUI, enabling loading and inference with m
 
 ## Supported Formats
 
-| Format | Layout | Description |
-|--------|--------|-------------|
-| FP8 (tensor-wise) | `TensorCoreFP8Layout` | Standard FP8 with tensor-wise scaling | Supported |
-| FP8 (row-wise) | `RowWiseFP8Layout` | Per-row FP8 scaling | WIP |
-| FP8 (block-wise) | `BlockWiseFP8Layout` | 2D block-wise FP8 scaling | WIP |
-| INT8 (block-wise) | `BlockWiseINT8Layout` | Block-wise INT8 with Triton kernels | Supported |
+| Format | Layout | quant_format | Status |
+|--------|--------|--------------|--------|
+| FP8 (tensor-wise) | `TensorCoreFP8Layout` | `float8_e4m3fn` | Supported (ComfyUI built-in) |
+| FP8 (row-wise) | `RowWiseFP8Layout` | `float8_e4m3fn_rowwise` | WIP |
+| FP8 (block-wise) | `BlockWiseFP8Layout` | `float8_e4m3fn_blockwise` | WIP |
+| INT8 (block-wise) | `BlockWiseINT8Layout` | `int8` | Supported |
 
 ## Installation
 
