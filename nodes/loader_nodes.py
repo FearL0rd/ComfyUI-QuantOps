@@ -317,15 +317,58 @@ class QuantizedCLIPLoader:
         return (clip,)
 
 
+class BNB4bitUNETLoader:
+    """
+    Load UNET/diffusion models quantized to BNB 4-bit (NF4/FP4) format.
+
+    Supports models quantized by convert_to_quant with --bnb-4bit flag.
+    Dequantizes weights during forward pass using pure PyTorch.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Load BNB 4-bit (NF4/FP4) quantized diffusion models. Uses pure PyTorch dequantization."
+
+    def load_unet(self, unet_name):
+        """Load a BNB 4-bit quantized UNET model."""
+        try:
+            from ..bnb4bit_ops import HybridBNB4bitOps
+        except ImportError as e:
+            logging.error(f"Failed to import HybridBNB4bitOps: {e}")
+            raise
+
+        # Get model path
+        unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
+
+        # Load with our custom BNB 4-bit ops
+        model_options = {"custom_operations": HybridBNB4bitOps}
+        logging.info(f"BNB4bitUNETLoader: Loading {unet_name} with HybridBNB4bitOps")
+        
+        model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+
+        return (model,)
+
+
 # ComfyUI node registration
 NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
     "QuantizedUNETLoader": QuantizedUNETLoader,
     "QuantizedCLIPLoader": QuantizedCLIPLoader,
+    "BNB4bitUNETLoader": BNB4bitUNETLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedModelLoader": "Load Checkpoint (Quantized)",
     "QuantizedUNETLoader": "Load Diffusion Model (Quantized)",
     "QuantizedCLIPLoader": "Load CLIP (Quantized)",
+    "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
 }
