@@ -234,6 +234,9 @@ class HybridBNB4bitOps(manual_cast):
 
     class Linear(manual_cast.Linear):
         def __init__(self, *args, **kwargs):
+            # Use device='meta' to avoid allocating full weight tensors
+            # The actual weights will be loaded in _load_from_state_dict
+            kwargs['device'] = 'meta'
             super().__init__(*args, **kwargs)
             # 4-bit quantization state
             self.is_bnb_4bit = False
@@ -247,6 +250,7 @@ class HybridBNB4bitOps(manual_cast):
 
         def reset_parameters(self):
             return None
+
 
         def _load_from_state_dict(
             self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
