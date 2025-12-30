@@ -460,21 +460,67 @@ class BNB4bitUNETLoader:
         offload_device = model_management.unet_offload_device()
         unet_dtype = torch.bfloat16
 
-        # Hardcoded FluxParams based on model type (following FluxMod pattern)
+        # Import shape extraction helper
+        from ..bnb4bit_ops import get_original_shape
+
+        # Extract dimensions from quant_state metadata (BNB stores original shapes)
+        img_in_shape = get_original_shape(sd, "img_in.weight")
+        txt_in_shape = get_original_shape(sd, "txt_in.weight")
+        guidance_in_shape = get_original_shape(sd, "guidance_in.in_layer.weight")
+
+        # Derive model dimensions from shapes
+        if img_in_shape:
+            hidden_size = img_in_shape[0]
+            # in_channels depends on patch_size
+        else:
+            hidden_size = 6144 if is_flux2 else 3072
+
+        if txt_in_shape:
+            context_in_dim = txt_in_shape[1]
+        else:
+            context_in_dim = 15360 if is_flux2 else 4096
+
+        if guidance_in_shape:
+            vec_in_dim = guidance_in_shape[1]
+        else:
+            vec_in_dim = 256 if is_flux2 else 768
+
+        # Count blocks from state dict keys
+        def count_blocks(keys, prefix):
+            max_idx = -1
+            for k in keys:
+                if prefix in k:
+                    try:
+                        idx = int(k.split(prefix)[1].split('.')[0])
+                        max_idx = max(max_idx, idx)
+                    except (ValueError, IndexError):
+                        pass
+            return max_idx + 1 if max_idx >= 0 else 0
+
+        depth = count_blocks(sd.keys(), "double_blocks.")
+        depth_single_blocks = count_blocks(sd.keys(), "single_blocks.")
+
+        logging.info(f"BNB4bitUNETLoader: Extracted from quant_state:")
+        logging.info(f"  hidden_size={hidden_size}, context_in_dim={context_in_dim}, vec_in_dim={vec_in_dim}")
+        logging.info(f"  depth={depth}, depth_single_blocks={depth_single_blocks}")
+
+        # Build FluxParams based on detected model type + extracted dimensions
         if model_type == "flux2":
+            patch_size = 1
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 128
             params = flux_model.FluxParams(
-                in_channels=16,
+                in_channels=in_channels,
                 out_channels=128,
-                vec_in_dim=768,
-                context_in_dim=4096,
-                hidden_size=3072,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
                 mlp_ratio=3.0,
                 num_heads=48,
-                depth=19,
-                depth_single_blocks=38,
+                depth=depth if depth > 0 else 8,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 48,
                 axes_dim=[32, 32, 32, 32],
                 theta=2000,
-                patch_size=1,
+                patch_size=patch_size,
                 qkv_bias=False,
                 guidance_embed=True,
                 txt_ids_dims=[3],
@@ -483,57 +529,60 @@ class BNB4bitUNETLoader:
                 ops_bias=False,
             )
         elif model_type == "chroma":
-            # Chroma: same as Flux but with distilled guidance
+            patch_size = 2
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 64
             params = flux_model.FluxParams(
-                in_channels=64,
+                in_channels=in_channels,
                 out_channels=64,
-                vec_in_dim=768,
-                context_in_dim=4096,
-                hidden_size=3072,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
                 mlp_ratio=4.0,
                 num_heads=24,
-                depth=19,
-                depth_single_blocks=38,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
                 axes_dim=[16, 56, 56],
                 theta=10000,
-                patch_size=2,
+                patch_size=patch_size,
                 qkv_bias=True,
                 guidance_embed=False,
                 txt_ids_dims=[],
             )
         elif model_type in ("chroma_radiance", "chroma_radiance_x0"):
-            # Chroma Radiance variants
+            patch_size = 16
             params = flux_model.FluxParams(
                 in_channels=3,
                 out_channels=3,
-                vec_in_dim=768,
-                context_in_dim=4096,
-                hidden_size=3072,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
                 mlp_ratio=4.0,
                 num_heads=24,
-                depth=19,
-                depth_single_blocks=38,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
                 axes_dim=[16, 56, 56],
                 theta=10000,
-                patch_size=16,
+                patch_size=patch_size,
                 qkv_bias=True,
                 guidance_embed=False,
                 txt_ids_dims=[],
             )
         else:  # flux (default)
+            patch_size = 2
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 16
             params = flux_model.FluxParams(
-                in_channels=16,
+                in_channels=in_channels,
                 out_channels=16,
-                vec_in_dim=768,
-                context_in_dim=4096,
-                hidden_size=3072,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
                 mlp_ratio=4.0,
                 num_heads=24,
-                depth=19,
-                depth_single_blocks=38,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
                 axes_dim=[16, 56, 56],
                 theta=10000,
-                patch_size=2,
+                patch_size=patch_size,
                 qkv_bias=True,
                 guidance_embed=True,
                 txt_ids_dims=[],

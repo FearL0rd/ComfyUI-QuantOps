@@ -129,6 +129,34 @@ def preprocess_bnb_state_dict(state_dict: dict) -> dict:
     return new_sd
 
 
+def get_original_shape(state_dict: dict, weight_key: str) -> tuple:
+    """
+    Get original shape of a BNB 4-bit quantized weight from its quant_state.
+
+    BNB stores original shape in the quant_state JSON metadata:
+    - key.quant_state.bitsandbytes__nf4 or __fp4 contains {"shape": [N, K], ...}
+
+    Args:
+        state_dict: State dict with BNB 4-bit weights
+        weight_key: Key of the weight (without .quant_state suffix)
+
+    Returns:
+        Tuple of original shape, or None if not found
+    """
+    # Try NF4 first, then FP4
+    for suffix in ['.quant_state.bitsandbytes__nf4', '.quant_state.bitsandbytes__fp4']:
+        qs_key = weight_key + suffix
+        if qs_key in state_dict:
+            try:
+                qs = tensor_to_dict(state_dict[qs_key])
+                shape = qs.get('shape', None)
+                if shape:
+                    return tuple(shape)
+            except Exception as e:
+                logging.warning(f"Failed to parse quant_state for {weight_key}: {e}")
+    return None
+
+
 def dequantize_bnb_4bit(
     packed: torch.Tensor,
     absmax: torch.Tensor,
