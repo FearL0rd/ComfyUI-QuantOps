@@ -4,13 +4,19 @@ Loader nodes for quantized models.
 These nodes provide custom model loading with:
 - Kernel backend selection (pytorch/triton)
 - Legacy format support (scale_weight -> weight_scale conversion)
-- INT8, and FP8 variants
+- INT8, FP8, and BNB 4-bit variants
 """
 
 import logging
+import torch
 import folder_paths
 import comfy.sd
 import comfy.utils
+import comfy.model_base
+import comfy.model_patcher
+import comfy.supported_models_base
+import comfy.latent_formats
+import comfy.conds
 
 
 class QuantizedModelLoader:
@@ -19,7 +25,7 @@ class QuantizedModelLoader:
 
     Supports models quantized by convert_to_quant (with or without --comfy_quant flag).
     Automatically handles legacy scale_weight -> weight_scale conversion.
-    
+
     FP8 Modes:
     - float8_e4m3fn: Standard tensor-scaled FP8 (uses ComfyUI built-in handling)
     - float8_e4m3fn_blockwise: Block-wise scaled FP8 (uses HybridFP8Ops)
@@ -137,7 +143,7 @@ class QuantizedUNETLoader:
     Load UNET/diffusion models with custom quantization layouts.
 
     Handles legacy scale_weight format automatically.
-    
+
     FP8 Modes:
     - float8_e4m3fn: Standard tensor-scaled FP8 (uses ComfyUI built-in handling)
     - float8_e4m3fn_blockwise: Block-wise scaled FP8 (uses HybridFP8Ops)
@@ -317,15 +323,320 @@ class QuantizedCLIPLoader:
         return (clip,)
 
 
+class BNB4bitFluxConfig(comfy.supported_models_base.BASE):
+    """Minimal model config for BNB 4-bit Flux models."""
+    unet_config = {}
+    unet_extra_config = {}
+    latent_format = comfy.latent_formats.Flux
+    memory_usage_factor = 2.8
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+
+    def __init__(self, is_flux2=False):
+        self.unet_config = {}
+        self.latent_format = comfy.latent_formats.Flux2() if is_flux2 else comfy.latent_formats.Flux()
+        self.unet_config["disable_unet_model_creation"] = True
+        if is_flux2:
+            self.memory_usage_factor = 2.8 * 4 * 2.36  # Flux2 uses more memory
+
+
+class BNB4bitFluxModel(comfy.model_base.BaseModel):
+    """Base model class for BNB 4-bit Flux loading."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = kwargs.get("cross_attn", None)
+        if cross_attn is not None:
+            out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
+        guidance = kwargs.get("guidance", 3.5)
+        if guidance is not None:
+            out['guidance'] = comfy.conds.CONDRegular(torch.FloatTensor([guidance]))
+        return out
+
+
+class BNB4bitUNETLoader:
+    """
+    Load UNET/diffusion models quantized to BNB 4-bit (NF4/FP4) format.
+
+    Supports models quantized by convert_to_quant with --bnb-4bit flag.
+    Dequantizes weights during forward pass using pure PyTorch.
+
+    Auto-detects Flux vs Flux2 from state dict keys (not shapes).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
+            },
+            "optional": {
+                "model_type_override": (["auto", "flux2", "flux", "chroma", "chroma_radiance", "chroma_radiance_x0"],),
+            },
+        }
+
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Load BNB 4-bit (NF4/FP4) quantized Flux/Chroma/Radiance models. Uses pure PyTorch dequantization."
+
+    def _detect_model_type(self, state_dict_keys):
+        """
+        Detect model type from state dict keys (not shapes).
+
+        Detection logic:
+        - Flux2: has double_stream_modulation_img.lin.weight
+        - Chroma: has distilled_guidance_layer but NOT nerf and NOT __x0__
+        - Chroma Radiance: has distilled_guidance_layer AND nerf but NOT __x0__
+        - Chroma Radiance X0: has distilled_guidance_layer AND nerf AND __x0__
+        - Flux: default (has double_blocks but none of the above)
+        """
+        # Helper to check key presence (handles BNB suffix keys)
+        def has_key_pattern(pattern):
+            return any(pattern in k for k in state_dict_keys)
+
+        # Check for Flux2 unique key
+        if has_key_pattern("double_stream_modulation_img.lin.weight"):
+            return "flux2"
+
+        # Check for Chroma/Radiance variants
+        has_distilled = has_key_pattern("distilled_guidance_layer.")
+        has_nerf = has_key_pattern("nerf_blocks.")
+        has_x0 = has_key_pattern("__x0__")
+
+        if has_distilled:
+            if has_nerf:
+                if has_x0:
+                    return "chroma_radiance_x0"
+                else:
+                    return "chroma_radiance"
+            else:
+                return "chroma"
+
+        # Default to Flux1
+        return "flux"
+
+    def load_unet(self, unet_name, model_type_override="auto"):
+        """Load a BNB 4-bit quantized UNET model."""
+        import comfy.model_management as model_management
+        import comfy.ldm.flux.model as flux_model
+
+        try:
+            from ..bnb4bit_ops import HybridBNB4bitOps
+        except ImportError as e:
+            logging.error(f"Failed to import HybridBNB4bitOps: {e}")
+            raise
+
+        # Get model path and load state dict
+        unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
+        sd = comfy.utils.load_torch_file(unet_path)
+
+        # Strip prefix if present
+        new_sd = {}
+        for k, v in sd.items():
+            if k.startswith("model.diffusion_model."):
+                new_sd[k[22:]] = v
+            else:
+                new_sd[k] = v
+        sd = new_sd
+
+        # Detect or use override
+        if model_type_override == "auto":
+            model_type = self._detect_model_type(sd.keys())
+            logging.info(f"BNB4bitUNETLoader: Auto-detected model type: {model_type}")
+        else:
+            model_type = model_type_override
+            logging.info(f"BNB4bitUNETLoader: Using override model type: {model_type}")
+
+        logging.info(f"BNB4bitUNETLoader: Loading {unet_name} as {model_type}")
+
+        is_flux2 = model_type == "flux2"
+        is_chroma = model_type in ("chroma", "chroma_radiance", "chroma_radiance_x0")
+
+        load_device = model_management.get_torch_device()
+        offload_device = model_management.unet_offload_device()
+        unet_dtype = torch.bfloat16
+
+        # Import shape extraction helper
+        from ..bnb4bit_ops import get_original_shape
+
+        # Extract dimensions from quant_state metadata (BNB stores original shapes)
+        img_in_shape = get_original_shape(sd, "img_in.weight")
+        txt_in_shape = get_original_shape(sd, "txt_in.weight")
+        guidance_in_shape = get_original_shape(sd, "guidance_in.in_layer.weight")
+
+        # Derive model dimensions from shapes
+        if img_in_shape:
+            hidden_size = img_in_shape[0]
+            # in_channels depends on patch_size
+        else:
+            hidden_size = 6144 if is_flux2 else 3072
+
+        if txt_in_shape:
+            context_in_dim = txt_in_shape[1]
+        else:
+            context_in_dim = 15360 if is_flux2 else 4096
+
+        if guidance_in_shape:
+            vec_in_dim = guidance_in_shape[1]
+        else:
+            vec_in_dim = 256 if is_flux2 else 768
+
+        # Count blocks from state dict keys
+        def count_blocks(keys, prefix):
+            max_idx = -1
+            for k in keys:
+                if prefix in k:
+                    try:
+                        idx = int(k.split(prefix)[1].split('.')[0])
+                        max_idx = max(max_idx, idx)
+                    except (ValueError, IndexError):
+                        pass
+            return max_idx + 1 if max_idx >= 0 else 0
+
+        depth = count_blocks(sd.keys(), "double_blocks.")
+        depth_single_blocks = count_blocks(sd.keys(), "single_blocks.")
+
+        logging.info(f"BNB4bitUNETLoader: Extracted from quant_state:")
+        logging.info(f"  hidden_size={hidden_size}, context_in_dim={context_in_dim}, vec_in_dim={vec_in_dim}")
+        logging.info(f"  depth={depth}, depth_single_blocks={depth_single_blocks}")
+
+        # Build FluxParams based on detected model type + extracted dimensions
+        if model_type == "flux2":
+            patch_size = 1
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 128
+            params = flux_model.FluxParams(
+                in_channels=in_channels,
+                out_channels=128,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
+                mlp_ratio=3.0,
+                num_heads=48,
+                depth=depth if depth > 0 else 8,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 48,
+                axes_dim=[32, 32, 32, 32],
+                theta=2000,
+                patch_size=patch_size,
+                qkv_bias=False,
+                guidance_embed=True,
+                txt_ids_dims=[3],
+                global_modulation=True,
+                mlp_silu_act=True,
+                ops_bias=False,
+            )
+        elif model_type == "chroma":
+            patch_size = 2
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 64
+            params = flux_model.FluxParams(
+                in_channels=in_channels,
+                out_channels=64,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
+                mlp_ratio=4.0,
+                num_heads=24,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
+                axes_dim=[16, 56, 56],
+                theta=10000,
+                patch_size=patch_size,
+                qkv_bias=True,
+                guidance_embed=False,
+                txt_ids_dims=[],
+            )
+        elif model_type in ("chroma_radiance", "chroma_radiance_x0"):
+            patch_size = 16
+            params = flux_model.FluxParams(
+                in_channels=3,
+                out_channels=3,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
+                mlp_ratio=4.0,
+                num_heads=24,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
+                axes_dim=[16, 56, 56],
+                theta=10000,
+                patch_size=patch_size,
+                qkv_bias=True,
+                guidance_embed=False,
+                txt_ids_dims=[],
+            )
+        else:  # flux (default)
+            patch_size = 2
+            in_channels = img_in_shape[1] // (patch_size * patch_size) if img_in_shape else 16
+            params = flux_model.FluxParams(
+                in_channels=in_channels,
+                out_channels=16,
+                vec_in_dim=vec_in_dim,
+                context_in_dim=context_in_dim,
+                hidden_size=hidden_size,
+                mlp_ratio=4.0,
+                num_heads=24,
+                depth=depth if depth > 0 else 19,
+                depth_single_blocks=depth_single_blocks if depth_single_blocks > 0 else 38,
+                axes_dim=[16, 56, 56],
+                theta=10000,
+                patch_size=patch_size,
+                qkv_bias=True,
+                guidance_embed=True,
+                txt_ids_dims=[],
+            )
+
+        # Create model config and base model
+        model_conf = BNB4bitFluxConfig(is_flux2=is_flux2)
+        model_conf.set_inference_dtype(unet_dtype, unet_dtype)  # Set compute dtype
+        model = BNB4bitFluxModel(
+            model_conf,
+            model_type=comfy.model_base.ModelType.FLUX,
+            device=load_device
+        )
+
+        logging.info(f"BNB4bitUNETLoader: Creating Flux model with HybridBNB4bitOps")
+
+        # Create diffusion model with our custom ops
+        model.diffusion_model = flux_model.Flux(
+            device=offload_device,
+            dtype=unet_dtype,
+            operations=HybridBNB4bitOps,
+            **{k: getattr(params, k) for k in params.__dataclass_fields__}
+        )
+        model.diffusion_model.eval()
+        model.diffusion_model.dtype = unet_dtype
+
+        # Load weights from packed state dict using our custom ops
+        m, u = model.diffusion_model.load_state_dict(sd, strict=False)
+        if len(m) > 0:
+            logging.warning(f"BNB4bitUNETLoader: missing keys: {len(m)}")
+            logging.debug(f"Missing: {m[:10]}...")
+        if len(u) > 0:
+            logging.warning(f"BNB4bitUNETLoader: unexpected keys: {len(u)}")
+            logging.debug(f"Unexpected: {u[:10]}...")
+
+        logging.info(f"BNB4bitUNETLoader: Successfully loaded {unet_name}")
+
+        patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+        return (patcher,)
+
+
 # ComfyUI node registration
 NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
     "QuantizedUNETLoader": QuantizedUNETLoader,
     "QuantizedCLIPLoader": QuantizedCLIPLoader,
+    "BNB4bitUNETLoader": BNB4bitUNETLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedModelLoader": "Load Checkpoint (Quantized)",
     "QuantizedUNETLoader": "Load Diffusion Model (Quantized)",
     "QuantizedCLIPLoader": "Load CLIP (Quantized)",
+    "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
 }
+
+
