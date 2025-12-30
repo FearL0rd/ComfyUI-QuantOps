@@ -590,6 +590,7 @@ class BNB4bitUNETLoader:
 
         # Create model config and base model
         model_conf = BNB4bitFluxConfig(is_flux2=is_flux2)
+        model_conf.set_inference_dtype(unet_dtype, unet_dtype)  # Set compute dtype
         model = BNB4bitFluxModel(
             model_conf,
             model_type=comfy.model_base.ModelType.FLUX,
@@ -601,10 +602,12 @@ class BNB4bitUNETLoader:
         # Create diffusion model with our custom ops
         model.diffusion_model = flux_model.Flux(
             device=offload_device,
+            dtype=unet_dtype,
             operations=HybridBNB4bitOps,
             **{k: getattr(params, k) for k in params.__dataclass_fields__}
         )
         model.diffusion_model.eval()
+        model.diffusion_model.dtype = unet_dtype
 
         # Load weights from packed state dict using our custom ops
         m, u = model.diffusion_model.load_state_dict(sd, strict=False)
@@ -617,7 +620,8 @@ class BNB4bitUNETLoader:
 
         logging.info(f"BNB4bitUNETLoader: Successfully loaded {unet_name}")
 
-        return (comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device),)
+        patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+        return (patcher,)
 
 
 # ComfyUI node registration
