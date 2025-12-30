@@ -233,11 +233,14 @@ class HybridBNB4bitOps(manual_cast):
     """
 
     class Linear(manual_cast.Linear):
-        def __init__(self, *args, **kwargs):
-            # Use device='meta' to avoid allocating full weight tensors
-            # The actual weights will be loaded in _load_from_state_dict
-            kwargs['device'] = 'meta'
-            super().__init__(*args, **kwargs)
+        def __init__(self, in_features, out_features, *args, **kwargs):
+            # Create with tiny placeholder to avoid OOM
+            # Actual weights loaded in _load_from_state_dict
+            # Store real dimensions for later use
+            self._real_in_features = in_features
+            self._real_out_features = out_features
+            # Initialize with 1x1 placeholder
+            super().__init__(1, 1, *args, **kwargs)
             # 4-bit quantization state
             self.is_bnb_4bit = False
             self.packed_weight = None
@@ -250,6 +253,7 @@ class HybridBNB4bitOps(manual_cast):
 
         def reset_parameters(self):
             return None
+
 
 
         def _load_from_state_dict(
