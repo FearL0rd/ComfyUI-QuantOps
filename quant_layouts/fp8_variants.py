@@ -489,3 +489,102 @@ def blockwise_fp8_func(func, args, kwargs):
         # Use _copy_with to preserve params
         return input_tensor._copy_with(qdata=func(*ar, **kwargs))
     return func(*args, **kwargs)
+
+
+# =============================================================================
+# Override handler for core TensorCoreFP8Layout to ensure float32 scales
+# =============================================================================
+# comfy_kitchen requires float32 scales for torch._scaled_mm but models
+# may have float16 scales. This override ensures conversion before matmul.
+
+try:
+    from comfy.quant_ops import TensorCoreFP8Layout
+
+    def _ensure_float32_scale(scale):
+        """Convert scale to float32 if needed."""
+        if scale is not None and scale.dtype in (torch.float16, torch.bfloat16):
+            return scale.to(torch.float32)
+        return scale
+
+    @register_layout_op(torch.ops.aten.linear.default, TensorCoreFP8Layout)
+    def tensorcore_fp8_linear_f32_scale(func, args, kwargs):
+        """TensorCoreFP8Layout linear with guaranteed float32 scales."""
+        input_tensor = args[0]
+        weight = args[1]
+        bias = args[2] if len(args) > 2 else None
+
+        # Fast path: both operands are FP8 QuantizedTensors
+        if isinstance(input_tensor, QuantizedTensor) and isinstance(weight, QuantizedTensor):
+            input_qdata = input_tensor._qdata
+            weight_qdata = weight._qdata
+
+            # Ensure scales are float32
+            scale_a = _ensure_float32_scale(input_tensor._params.scale)
+            scale_b = _ensure_float32_scale(weight._params.scale)
+
+            out_dtype = kwargs.get("out_dtype", input_tensor._params.orig_dtype)
+
+            # Transpose weight for linear: output = input @ weight.T
+            weight_t = weight_qdata.t().contiguous()
+
+            try:
+                output = torch._scaled_mm(
+                    input_qdata.contiguous(),
+                    weight_t,
+                    bias=bias,
+                    scale_a=scale_a,
+                    scale_b=scale_b,
+                    out_dtype=out_dtype,
+                )
+                # Handle tuple return for older PyTorch versions
+                return output[0] if isinstance(output, tuple) else output
+
+            except (RuntimeError, TypeError) as e:
+                logging.warning(f"FP8 tensorcore override _scaled_mm failed: {e}, falling back")
+
+        # Fallback: dequantize
+        if isinstance(input_tensor, QuantizedTensor):
+            input_tensor = input_tensor.dequantize()
+        if isinstance(weight, QuantizedTensor):
+            weight = weight.dequantize()
+        return torch.nn.functional.linear(input_tensor, weight, bias)
+
+    @register_layout_op(torch.ops.aten.mm.default, TensorCoreFP8Layout)
+    def tensorcore_fp8_mm_f32_scale(func, args, kwargs):
+        """TensorCoreFP8Layout mm with guaranteed float32 scales."""
+        a = args[0]
+        b = args[1]
+
+        if isinstance(a, QuantizedTensor) and isinstance(b, QuantizedTensor):
+            a_qdata = a._qdata
+            b_qdata = b._qdata
+
+            scale_a = _ensure_float32_scale(a._params.scale)
+            scale_b = _ensure_float32_scale(b._params.scale)
+
+            out_dtype = kwargs.get("out_dtype", a._params.orig_dtype)
+
+            try:
+                output = torch._scaled_mm(
+                    a_qdata.contiguous(),
+                    b_qdata.contiguous(),
+                    scale_a=scale_a,
+                    scale_b=scale_b,
+                    out_dtype=out_dtype,
+                )
+                return output[0] if isinstance(output, tuple) else output
+            except (RuntimeError, TypeError):
+                pass
+
+        # Fallback: dequantize
+        if isinstance(a, QuantizedTensor):
+            a = a.dequantize()
+        if isinstance(b, QuantizedTensor):
+            b = b.dequantize()
+        return func(a, b)
+
+    logging.info("ComfyUI-QuantOps: Registered TensorCoreFP8Layout override with float32 scale fix")
+
+except ImportError:
+    logging.debug("TensorCoreFP8Layout not available, skipping override registration")
+
