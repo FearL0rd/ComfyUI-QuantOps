@@ -185,8 +185,8 @@ class HybridFP8Ops(manual_cast):
                     weight = weight.to(device=input.device)
 
                 # Update orig_dtype for dequantization
-                if hasattr(weight, "_layout_params"):
-                    weight._layout_params["orig_dtype"] = input_dtype
+                if hasattr(weight, "_params"):
+                    weight._params.orig_dtype = input_dtype
 
                 bias = self.bias
                 if bias is not None:

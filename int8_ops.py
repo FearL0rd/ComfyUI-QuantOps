@@ -192,8 +192,8 @@ class HybridINT8Ops(manual_cast):
                     weight = weight.to(device=input.device)
                 
                 # Update orig_dtype
-                if hasattr(weight, '_layout_params'):
-                    weight._layout_params['orig_dtype'] = input_dtype
+                if hasattr(weight, '_params'):
+                    weight._params.orig_dtype = input_dtype
                 
                 bias = self.bias
                 if bias is not None:
@@ -255,8 +255,8 @@ class HybridINT8Ops(manual_cast):
                     weight = weight.to(device=input.device)
                 
                 # Update orig_dtype for proper output casting
-                if hasattr(weight, '_layout_params'):
-                    weight._layout_params['orig_dtype'] = input_dtype
+                if hasattr(weight, '_params'):
+                    weight._params.orig_dtype = input_dtype
                 
                 # Dispatch to int8_linear handler (uses dynamic act quant now)
                 base_out = torch.nn.functional.linear(input, weight, None)
