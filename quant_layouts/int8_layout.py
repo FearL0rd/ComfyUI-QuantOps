@@ -110,7 +110,7 @@ class BlockWiseINT8Layout(QuantizedLayout):
     # Class-level setting for kernel backend
     use_triton = False  # Set via loader node
 
-    @dataclass
+    @dataclass(frozen=True)
     class Params(BaseLayoutParams):
         """Block-wise INT8 layout parameters."""
         block_size: int = 128

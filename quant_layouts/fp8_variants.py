@@ -69,7 +69,7 @@ class RowWiseFP8Layout(QuantizedLayout):
     - orig_dtype: Original dtype before quantization
     """
 
-    @dataclass
+    @dataclass(frozen=True)
     class Params(BaseLayoutParams):
         """Row-wise FP8 layout parameters. Inherits scale, orig_dtype, orig_shape."""
         pass  # No additional fields needed - BaseLayoutParams has all we need
@@ -151,7 +151,7 @@ class BlockWiseFP8Layout(QuantizedLayout):
     - orig_dtype: Original dtype before quantization
     """
 
-    @dataclass
+    @dataclass(frozen=True)
     class Params(BaseLayoutParams):
         """Block-wise FP8 layout parameters."""
         block_size: int = 64
