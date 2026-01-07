@@ -29,12 +29,32 @@ _triton_functions = {}
 
 
 def _check_triton_available():
-    """Check and cache Triton INT8 kernel availability."""
+    """
+    Check and cache Triton INT8 kernel availability.
+    
+    Priority:
+    1. Check comfy-kitchen triton backend (if ck is available)
+    2. Fall back to independent Triton import check
+    """
     global _triton_int8_available, _triton_functions
 
     if _triton_int8_available is not None:
         return _triton_int8_available
 
+    # Check comfy-kitchen triton backend first
+    try:
+        from .. import is_ck_triton_available
+        if is_ck_triton_available():
+            # ck triton is available - try to load our kernels
+            pass  # Fall through to kernel import below
+        else:
+            # ck says triton unavailable - still try our independent check
+            pass
+    except ImportError:
+        # ck not available - use independent check
+        pass
+
+    # Try to import our Triton kernels
     try:
         from ..kernels.int8_kernels import (
             act_quant as triton_act_quant,

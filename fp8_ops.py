@@ -12,7 +12,7 @@ import json
 import torch
 import logging
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
-from comfy.quant_ops import QuantizedTensor, LAYOUTS, QUANT_ALGOS
+from comfy.quant_ops import QuantizedTensor, QUANT_ALGOS, get_layout_class
 
 
 class HybridFP8Ops(manual_cast):
@@ -120,7 +120,9 @@ class HybridFP8Ops(manual_cast):
                             self.layout_type = "TensorCoreFP8Layout"
 
                     # Check if the layout is registered
-                    if self.layout_type not in LAYOUTS:
+                    try:
+                        get_layout_class(self.layout_type)
+                    except KeyError:
                         logging.warning(
                             f"HybridFP8Ops: Layout '{self.layout_type}' not registered, using TensorCoreFP8Layout"
                         )

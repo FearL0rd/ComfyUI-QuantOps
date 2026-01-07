@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import logging
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
-from comfy.quant_ops import QuantizedTensor, LAYOUTS
+from comfy.quant_ops import QuantizedTensor
 from comfy.model_patcher import LowVramPatch
 
 # Try to import our INT8 layout

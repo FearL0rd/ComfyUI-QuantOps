@@ -25,6 +25,24 @@ except ImportError:
     from comfy.quant_ops import QuantizedLayout
     BaseLayoutParams = object  # Will fail at runtime if used
 
+# Check comfy-kitchen triton backend first, then independent check
+def _should_use_fp8_kernels():
+    """Check FP8 Triton kernel availability using ck or independent check."""
+    try:
+        from .. import is_ck_triton_available
+        if is_ck_triton_available():
+            return True
+    except ImportError:
+        pass
+    
+    # Fall back to independent check
+    try:
+        from ..kernels.fp8_kernels import _check_triton_available
+        return _check_triton_available()
+    except ImportError:
+        return False
+
+
 # Try to import FP8 Triton kernels
 try:
     from ..kernels.fp8_kernels import (
@@ -35,7 +53,7 @@ try:
         fp8_gemm_rowwise,
     )
 
-    _HAS_FP8_KERNELS = _check_triton_available()
+    _HAS_FP8_KERNELS = _should_use_fp8_kernels()
 except ImportError:
     _HAS_FP8_KERNELS = False
     logging.debug("FP8 Triton kernels not available, using dequantize fallback")
