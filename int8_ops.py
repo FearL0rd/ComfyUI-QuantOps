@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import logging
 from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
-from comfy.quant_ops import QuantizedTensor, LAYOUTS
+from comfy.quant_ops import QuantizedTensor
 from comfy.model_patcher import LowVramPatch
 
 # Try to import our INT8 layout
@@ -89,12 +89,14 @@ class HybridINT8Ops(manual_cast):
                     
                     if scale is not None and _HAS_INT8_LAYOUT:
                         # Create QuantizedTensor with BlockWiseINT8Layout
-                        layout_params = {
-                            'scale': scale.to(torch.float32),
-                            'block_size': self.block_size,
-                            'is_weight': True,
-                            'orig_dtype': torch.bfloat16,  # Will be updated in forward
-                        }
+                        from .quant_layouts.int8_layout import BlockWiseINT8Layout
+                        layout_params = BlockWiseINT8Layout.Params(
+                            scale=scale.to(torch.float32),
+                            orig_dtype=torch.bfloat16,  # Will be updated in forward
+                            orig_shape=tuple(weight_tensor.shape),
+                            block_size=self.block_size,
+                            is_weight=True,
+                        )
                         self.weight = torch.nn.Parameter(
                             QuantizedTensor(weight_tensor, "BlockWiseINT8Layout", layout_params),
                             requires_grad=False
@@ -192,8 +194,8 @@ class HybridINT8Ops(manual_cast):
                     weight = weight.to(device=input.device)
                 
                 # Update orig_dtype
-                if hasattr(weight, '_layout_params'):
-                    weight._layout_params['orig_dtype'] = input_dtype
+                if hasattr(weight, '_params'):
+                    object.__setattr__(weight._params, 'orig_dtype', input_dtype)
                 
                 bias = self.bias
                 if bias is not None:
@@ -255,8 +257,8 @@ class HybridINT8Ops(manual_cast):
                     weight = weight.to(device=input.device)
                 
                 # Update orig_dtype for proper output casting
-                if hasattr(weight, '_layout_params'):
-                    weight._layout_params['orig_dtype'] = input_dtype
+                if hasattr(weight, '_params'):
+                    object.__setattr__(weight._params, 'orig_dtype', input_dtype)
                 
                 # Dispatch to int8_linear handler (uses dynamic act quant now)
                 base_out = torch.nn.functional.linear(input, weight, None)

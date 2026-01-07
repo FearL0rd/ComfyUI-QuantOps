@@ -11,10 +11,37 @@ Otherwise, they fall back to dequantization.
 
 import torch
 import logging
-from typing import Tuple, Dict
+from dataclasses import dataclass
+from typing import Tuple, Optional
 
-# Import from ComfyUI core
-from comfy.quant_ops import QuantizedLayout, QuantizedTensor, register_layout_op
+# Import from ComfyUI core (which re-exports from comfy_kitchen)
+from comfy.quant_ops import QuantizedTensor, register_layout_op
+
+# Import base layout types from comfy_kitchen
+try:
+    from comfy_kitchen.tensor import QuantizedLayout, BaseLayoutParams
+except ImportError:
+    # Fallback for older versions
+    from comfy.quant_ops import QuantizedLayout
+    BaseLayoutParams = object  # Will fail at runtime if used
+
+# Check comfy-kitchen triton backend first, then independent check
+def _should_use_fp8_kernels():
+    """Check FP8 Triton kernel availability using ck or independent check."""
+    try:
+        from .. import is_ck_triton_available
+        if is_ck_triton_available():
+            return True
+    except ImportError:
+        pass
+    
+    # Fall back to independent check
+    try:
+        from ..kernels.fp8_kernels import _check_triton_available
+        return _check_triton_available()
+    except ImportError:
+        return False
+
 
 # Try to import FP8 Triton kernels
 try:
@@ -26,7 +53,7 @@ try:
         fp8_gemm_rowwise,
     )
 
-    _HAS_FP8_KERNELS = _check_triton_available()
+    _HAS_FP8_KERNELS = _should_use_fp8_kernels()
 except ImportError:
     _HAS_FP8_KERNELS = False
     logging.debug("FP8 Triton kernels not available, using dequantize fallback")
@@ -42,14 +69,20 @@ class RowWiseFP8Layout(QuantizedLayout):
     - orig_dtype: Original dtype before quantization
     """
 
+    @dataclass(frozen=True)
+    class Params(BaseLayoutParams):
+        """Row-wise FP8 layout parameters. Inherits scale, orig_dtype, orig_shape."""
+        pass  # No additional fields needed - BaseLayoutParams has all we need
+
     @classmethod
     def quantize(
         cls, tensor, scale=None, dtype=torch.float8_e4m3fn, **kwargs
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> Tuple[torch.Tensor, "RowWiseFP8Layout.Params"]:
         """
         Quantize a 2D tensor with row-wise scaling.
         """
         orig_dtype = tensor.dtype
+        orig_shape = tuple(tensor.shape)
 
         if tensor.ndim != 2:
             raise ValueError(
@@ -79,15 +112,19 @@ class RowWiseFP8Layout(QuantizedLayout):
         # Store dequant scale (reciprocal of quant scale)
         dequant_scale = (1.0 / quant_scale).squeeze(1)  # (M,)
 
-        layout_params = {
-            "scale": dequant_scale.to(torch.float32),
-            "orig_dtype": orig_dtype,
-        }
-        return qdata, layout_params
+        params = cls.Params(
+            scale=dequant_scale.to(torch.float32),
+            orig_dtype=orig_dtype,
+            orig_shape=orig_shape,
+        )
+        return qdata, params
 
     @staticmethod
-    def dequantize(qdata, scale, orig_dtype, **kwargs) -> torch.Tensor:
+    def dequantize(qdata, params) -> torch.Tensor:
         """Dequantize FP8 tensor with row-wise scaling."""
+        scale = params.scale
+        orig_dtype = params.orig_dtype
+        
         # Convert to target dtype (matching core ComfyUI pattern)
         plain_tensor = torch.ops.aten._to_copy.default(qdata, dtype=orig_dtype)
         # Cast scale to orig_dtype before in-place multiply to preserve output dtype
@@ -98,9 +135,9 @@ class RowWiseFP8Layout(QuantizedLayout):
         return plain_tensor
 
     @classmethod
-    def get_plain_tensors(cls, qtensor) -> torch.Tensor:
+    def get_plain_tensors(cls, qtensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Extract raw tensors for computation."""
-        return qtensor._qdata, qtensor._layout_params["scale"]
+        return qtensor._qdata, qtensor._params.scale
 
 
 class BlockWiseFP8Layout(QuantizedLayout):
@@ -114,14 +151,20 @@ class BlockWiseFP8Layout(QuantizedLayout):
     - orig_dtype: Original dtype before quantization
     """
 
+    @dataclass(frozen=True)
+    class Params(BaseLayoutParams):
+        """Block-wise FP8 layout parameters."""
+        block_size: int = 64
+
     @classmethod
     def quantize(
         cls, tensor, scale=None, block_size=64, dtype=torch.float8_e4m3fn, **kwargs
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> Tuple[torch.Tensor, "BlockWiseFP8Layout.Params"]:
         """
         Quantize a 2D tensor with 2D block-wise scaling.
         """
         orig_dtype = tensor.dtype
+        orig_shape = tuple(tensor.shape)
 
         if tensor.ndim != 2:
             raise ValueError(
@@ -163,16 +206,21 @@ class BlockWiseFP8Layout(QuantizedLayout):
         qdata = qdata_blocked.permute(0, 2, 1, 3).reshape(M, N)
         dequant_scale = 1.0 / quant_scale
 
-        layout_params = {
-            "scale": dequant_scale.to(torch.float32),
-            "block_size": block_size,
-            "orig_dtype": orig_dtype,
-        }
-        return qdata, layout_params
+        params = cls.Params(
+            scale=dequant_scale.to(torch.float32),
+            orig_dtype=orig_dtype,
+            orig_shape=orig_shape,
+            block_size=block_size,
+        )
+        return qdata, params
 
     @staticmethod
-    def dequantize(qdata, scale, block_size, orig_dtype, **kwargs) -> torch.Tensor:
+    def dequantize(qdata, params) -> torch.Tensor:
         """Dequantize FP8 tensor with 2D block-wise scaling."""
+        scale = params.scale
+        block_size = params.block_size
+        orig_dtype = params.orig_dtype
+        
         M, N = qdata.shape
 
         # Reshape to blocks
@@ -197,12 +245,12 @@ class BlockWiseFP8Layout(QuantizedLayout):
         return dequantized
 
     @classmethod
-    def get_plain_tensors(cls, qtensor) -> torch.Tensor:
+    def get_plain_tensors(cls, qtensor) -> Tuple[torch.Tensor, torch.Tensor, int]:
         """Extract raw tensors for computation."""
         return (
             qtensor._qdata,
-            qtensor._layout_params["scale"],
-            qtensor._layout_params["block_size"],
+            qtensor._params.scale,
+            qtensor._params.block_size,
         )
 
 
@@ -211,7 +259,7 @@ class BlockWiseFP8Layout(QuantizedLayout):
 # ==============================================================================
 
 
-@register_layout_op(torch.ops.aten.linear.default, "RowWiseFP8Layout")
+@register_layout_op(torch.ops.aten.linear.default, RowWiseFP8Layout)
 def rowwise_fp8_linear(func, args, kwargs):
     """Row-wise FP8 linear operation with native kernel support."""
     input_tensor = args[0]
@@ -224,7 +272,7 @@ def rowwise_fp8_linear(func, args, kwargs):
 
         # Check if weight is on CUDA (required for Triton)
         if w_qdata.is_cuda:
-            orig_dtype = weight._layout_params.get("orig_dtype", torch.float16)
+            orig_dtype = weight._params.orig_dtype
             # Use a reasonable block size for activation quantization
             act_block_size = 128
 
@@ -271,7 +319,7 @@ def rowwise_fp8_linear(func, args, kwargs):
     return torch.nn.functional.linear(input_tensor, weight, bias)
 
 
-@register_layout_op(torch.ops.aten.mm.default, "RowWiseFP8Layout")
+@register_layout_op(torch.ops.aten.mm.default, RowWiseFP8Layout)
 def rowwise_fp8_mm(func, args, kwargs):
     """Row-wise FP8 matrix multiplication (dequant-fallback)."""
     input_tensor = args[0]
@@ -285,7 +333,7 @@ def rowwise_fp8_mm(func, args, kwargs):
     return func(input_tensor, weight)
 
 
-@register_layout_op(torch.ops.aten.addmm.default, "RowWiseFP8Layout")
+@register_layout_op(torch.ops.aten.addmm.default, RowWiseFP8Layout)
 def rowwise_fp8_addmm(func, args, kwargs):
     """Row-wise FP8 addmm operation (dequant-fallback)."""
     bias = args[0]
@@ -302,8 +350,8 @@ def rowwise_fp8_addmm(func, args, kwargs):
     return func(bias, input_tensor, weight, **kwargs)
 
 
-@register_layout_op(torch.ops.aten.view.default, "RowWiseFP8Layout")
-@register_layout_op(torch.ops.aten.t.default, "RowWiseFP8Layout")
+@register_layout_op(torch.ops.aten.view.default, RowWiseFP8Layout)
+@register_layout_op(torch.ops.aten.t.default, RowWiseFP8Layout)
 def rowwise_fp8_func(func, args, kwargs):
     """Handle view/transpose for row-wise FP8 tensors."""
     input_tensor = args[0]
@@ -311,13 +359,12 @@ def rowwise_fp8_func(func, args, kwargs):
         plain_input, scale = RowWiseFP8Layout.get_plain_tensors(input_tensor)
         ar = list(args)
         ar[0] = plain_input
-        return QuantizedTensor(
-            func(*ar, **kwargs), "RowWiseFP8Layout", input_tensor._layout_params
-        )
+        # Use _copy_with to preserve params
+        return input_tensor._copy_with(qdata=func(*ar, **kwargs))
     return func(*args, **kwargs)
 
 
-@register_layout_op(torch.ops.aten.linear.default, "BlockWiseFP8Layout")
+@register_layout_op(torch.ops.aten.linear.default, BlockWiseFP8Layout)
 def blockwise_fp8_linear(func, args, kwargs):
     """Block-wise FP8 linear operation with native kernel support."""
     input_tensor = args[0]
@@ -330,7 +377,7 @@ def blockwise_fp8_linear(func, args, kwargs):
 
         # Check if weight is on CUDA (required for Triton)
         if w_qdata.is_cuda:
-            orig_dtype = weight._layout_params.get("orig_dtype", torch.float16)
+            orig_dtype = weight._params.orig_dtype
 
             # If input is already quantized FP8, use it directly
             if isinstance(input_tensor, QuantizedTensor):
@@ -415,7 +462,7 @@ def blockwise_fp8_linear(func, args, kwargs):
     return torch.nn.functional.linear(input_tensor, weight, bias)
 
 
-@register_layout_op(torch.ops.aten.mm.default, "BlockWiseFP8Layout")
+@register_layout_op(torch.ops.aten.mm.default, BlockWiseFP8Layout)
 def blockwise_fp8_mm(func, args, kwargs):
     """Block-wise FP8 matrix multiplication (dequant-fallback)."""
     input_tensor = args[0]
@@ -429,7 +476,7 @@ def blockwise_fp8_mm(func, args, kwargs):
     return func(input_tensor, weight)
 
 
-@register_layout_op(torch.ops.aten.addmm.default, "BlockWiseFP8Layout")
+@register_layout_op(torch.ops.aten.addmm.default, BlockWiseFP8Layout)
 def blockwise_fp8_addmm(func, args, kwargs):
     """Block-wise FP8 addmm operation (dequant-fallback)."""
     bias = args[0]
@@ -446,8 +493,8 @@ def blockwise_fp8_addmm(func, args, kwargs):
     return func(bias, input_tensor, weight, **kwargs)
 
 
-@register_layout_op(torch.ops.aten.view.default, "BlockWiseFP8Layout")
-@register_layout_op(torch.ops.aten.t.default, "BlockWiseFP8Layout")
+@register_layout_op(torch.ops.aten.view.default, BlockWiseFP8Layout)
+@register_layout_op(torch.ops.aten.t.default, BlockWiseFP8Layout)
 def blockwise_fp8_func(func, args, kwargs):
     """Handle view/transpose for block-wise FP8 tensors."""
     input_tensor = args[0]
@@ -457,7 +504,6 @@ def blockwise_fp8_func(func, args, kwargs):
         )
         ar = list(args)
         ar[0] = plain_input
-        return QuantizedTensor(
-            func(*ar, **kwargs), "BlockWiseFP8Layout", input_tensor._layout_params
-        )
+        # Use _copy_with to preserve params
+        return input_tensor._copy_with(qdata=func(*ar, **kwargs))
     return func(*args, **kwargs)

@@ -9,10 +9,19 @@ a clear error message instructs them to install it.
 import torch
 import os
 import logging
-from typing import Tuple, Dict
+from dataclasses import dataclass
+from typing import Tuple, Optional
 
-# Import from ComfyUI core
-from comfy.quant_ops import QuantizedLayout, QuantizedTensor, register_layout_op
+# Import from ComfyUI core (which re-exports from comfy_kitchen)
+from comfy.quant_ops import QuantizedTensor, register_layout_op
+
+# Import base layout types from comfy_kitchen
+try:
+    from comfy_kitchen.tensor import QuantizedLayout, BaseLayoutParams
+except ImportError:
+    # Fallback for older versions
+    from comfy.quant_ops import QuantizedLayout
+    BaseLayoutParams = object
 
 # Lazy Triton import state
 _triton_int8_available = None
@@ -20,12 +29,32 @@ _triton_functions = {}
 
 
 def _check_triton_available():
-    """Check and cache Triton INT8 kernel availability."""
+    """
+    Check and cache Triton INT8 kernel availability.
+    
+    Priority:
+    1. Check comfy-kitchen triton backend (if ck is available)
+    2. Fall back to independent Triton import check
+    """
     global _triton_int8_available, _triton_functions
 
     if _triton_int8_available is not None:
         return _triton_int8_available
 
+    # Check comfy-kitchen triton backend first
+    try:
+        from .. import is_ck_triton_available
+        if is_ck_triton_available():
+            # ck triton is available - try to load our kernels
+            pass  # Fall through to kernel import below
+        else:
+            # ck says triton unavailable - still try our independent check
+            pass
+    except ImportError:
+        # ck not available - use independent check
+        pass
+
+    # Try to import our Triton kernels
     try:
         from ..kernels.int8_kernels import (
             act_quant as triton_act_quant,
@@ -81,6 +110,12 @@ class BlockWiseINT8Layout(QuantizedLayout):
     # Class-level setting for kernel backend
     use_triton = False  # Set via loader node
 
+    @dataclass(frozen=True)
+    class Params(BaseLayoutParams):
+        """Block-wise INT8 layout parameters."""
+        block_size: int = 128
+        is_weight: bool = False
+
     @classmethod
     def set_backend(cls, backend: str):
         """Set the kernel backend ('triton' or 'pytorch')."""
@@ -97,11 +132,12 @@ class BlockWiseINT8Layout(QuantizedLayout):
     @classmethod
     def quantize(
         cls, tensor, scale=None, block_size=128, is_weight=False, **kwargs
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> Tuple[torch.Tensor, "BlockWiseINT8Layout.Params"]:
         """
         Quantize a tensor to INT8 with block-wise scaling.
         """
         orig_dtype = tensor.dtype
+        orig_shape = tuple(tensor.shape)
 
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
@@ -149,14 +185,15 @@ class BlockWiseINT8Layout(QuantizedLayout):
                     tensor, block_size, scale
                 )
 
-        layout_params = {
-            "scale": scale.to(torch.float32),
-            "block_size": block_size,
-            "is_weight": is_weight,
-            "orig_dtype": orig_dtype,
-        }
+        params = cls.Params(
+            scale=scale.to(torch.float32),
+            orig_dtype=orig_dtype,
+            orig_shape=orig_shape,
+            block_size=block_size,
+            is_weight=is_weight,
+        )
 
-        return qdata, layout_params
+        return qdata, params
 
     @staticmethod
     def _weight_quantize_pytorch(tensor, block_size, scale=None):
@@ -202,22 +239,19 @@ class BlockWiseINT8Layout(QuantizedLayout):
         return qdata, scale
 
     @staticmethod
-    def dequantize(
-        qdata,
-        scale,
-        block_size,
-        is_weight=False,
-        orig_dtype=None,
-        output_dtype=None,
-        **kwargs,
-    ) -> torch.Tensor:
+    def dequantize(qdata, params) -> torch.Tensor:
         """Dequantize INT8 tensor back to original precision."""
+        scale = params.scale
+        block_size = params.block_size
+        is_weight = params.is_weight
+        orig_dtype = params.orig_dtype
+        
         if not qdata.is_contiguous():
             qdata = qdata.contiguous()
         if not scale.is_contiguous():
             scale = scale.contiguous()
 
-        output_dt = output_dtype if output_dtype is not None else orig_dtype
+        output_dt = orig_dtype
 
         if is_weight:
             # Try Triton if enabled
@@ -289,9 +323,9 @@ class BlockWiseINT8Layout(QuantizedLayout):
         """Extract raw tensors for computation."""
         return (
             qtensor._qdata,
-            qtensor._layout_params["scale"],
-            qtensor._layout_params["block_size"],
-            qtensor._layout_params["is_weight"],
+            qtensor._params.scale,
+            qtensor._params.block_size,
+            qtensor._params.is_weight,
         )
 
 
@@ -379,7 +413,7 @@ def _int8_gemm_pytorch_fallback(
     return output
 
 
-@register_layout_op(torch.ops.aten.linear.default, "BlockWiseINT8Layout")
+@register_layout_op(torch.ops.aten.linear.default, BlockWiseINT8Layout)
 def int8_linear(func, args, kwargs):
     """Block-wise INT8 linear operation."""
     input_tensor = args[0]
@@ -395,7 +429,7 @@ def int8_linear(func, args, kwargs):
         )
         b_int8, b_scale, b_block_size, _ = BlockWiseINT8Layout.get_plain_tensors(weight)
 
-        out_dtype = input_tensor._layout_params["orig_dtype"]
+        out_dtype = input_tensor._params.orig_dtype
 
         # Try Triton if enabled
         if BlockWiseINT8Layout.use_triton and a_int8.is_cuda:
@@ -443,7 +477,7 @@ def int8_linear(func, args, kwargs):
     # Case 2: Weight is quantized, input is NOT - dynamically quantize input
     if isinstance(weight, QuantizedTensor) and not isinstance(input_tensor, QuantizedTensor):
         b_int8, b_scale, b_block_size, _ = BlockWiseINT8Layout.get_plain_tensors(weight)
-        out_dtype = weight._layout_params.get("orig_dtype", input_tensor.dtype)
+        out_dtype = weight._params.orig_dtype
         
         # Ensure input is contiguous and on same device
         if not input_tensor.is_contiguous():
@@ -468,12 +502,12 @@ def int8_linear(func, args, kwargs):
             return torch.nn.functional.linear(input_tensor, weight_dequant, bias)
         
         # Quantize activation on-the-fly
-        a_int8, a_layout_params = BlockWiseINT8Layout.quantize(
+        a_int8, a_params = BlockWiseINT8Layout.quantize(
             input_tensor,
             block_size=b_block_size,
             is_weight=False
         )
-        a_scale = a_layout_params["scale"]
+        a_scale = a_params.scale
         
         _log_int8_path("DYNAMIC_ACT_QUANT", a_int8.shape, b_int8.shape)
         
@@ -538,7 +572,7 @@ def int8_linear(func, args, kwargs):
     return torch.nn.functional.linear(input_tensor, weight, bias)
 
 
-@register_layout_op(torch.ops.aten.mm.default, "BlockWiseINT8Layout")
+@register_layout_op(torch.ops.aten.mm.default, BlockWiseINT8Layout)
 def int8_mm(func, args, kwargs):
     """Block-wise INT8 matmul."""
     input_tensor = args[0]
@@ -552,7 +586,7 @@ def int8_mm(func, args, kwargs):
     return func(input_tensor, weight)
 
 
-@register_layout_op(torch.ops.aten.addmm.default, "BlockWiseINT8Layout")
+@register_layout_op(torch.ops.aten.addmm.default, BlockWiseINT8Layout)
 def int8_addmm(func, args, kwargs):
     """Block-wise INT8 addmm."""
     bias = args[0]
@@ -569,8 +603,8 @@ def int8_addmm(func, args, kwargs):
     return func(bias, input_tensor, weight, **kwargs)
 
 
-@register_layout_op(torch.ops.aten.view.default, "BlockWiseINT8Layout")
-@register_layout_op(torch.ops.aten.t.default, "BlockWiseINT8Layout")
+@register_layout_op(torch.ops.aten.view.default, BlockWiseINT8Layout)
+@register_layout_op(torch.ops.aten.t.default, BlockWiseINT8Layout)
 def int8_func(func, args, kwargs):
     """Handle view/transpose for INT8 tensors."""
     input_tensor = args[0]
@@ -579,7 +613,6 @@ def int8_func(func, args, kwargs):
         ar = list(args)
         ar[0] = qdata
         new_qdata = func(*ar, **kwargs)
-        return QuantizedTensor(
-            new_qdata, "BlockWiseINT8Layout", input_tensor._layout_params
-        )
+        # Use _copy_with to preserve params
+        return input_tensor._copy_with(qdata=new_qdata)
     return func(*args, **kwargs)

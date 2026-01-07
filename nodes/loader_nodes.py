@@ -117,14 +117,29 @@ class QuantizedModelLoader:
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 
-        # Use ComfyUI's checkpoint loading with our custom operations
-        out = comfy.sd.load_checkpoint_guess_config(
-            ckpt_path,
-            output_vae=True,
-            output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=model_options,
-        )
+        # Load state dict with guaranteed float32 scales using our loader
+        try:
+            from ..utils.safetensors_loader import load_fp8_state_dict
+            sd, metadata = load_fp8_state_dict(ckpt_path, force_scale_float32=True)
+            logging.info("QuantizedModelLoader: Loaded state dict with float32 scales")
+            # Use ComfyUI's guess config with our pre-loaded state dict
+            out = comfy.sd.load_state_dict_guess_config(
+                sd,
+                output_vae=True,
+                output_clip=True,
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                model_options=model_options,
+            )
+        except Exception as e:
+            # Fallback to standard loading
+            logging.warning(f"QuantizedModelLoader: Custom loader failed, using fallback: {e}")
+            out = comfy.sd.load_checkpoint_guess_config(
+                ckpt_path,
+                output_vae=True,
+                output_clip=True,
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                model_options=model_options,
+            )
 
         model = out[0]
         clip = out[1]
@@ -219,8 +234,18 @@ class QuantizedUNETLoader:
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 
-        # Standard loading path
-        model = comfy.sd.load_diffusion_model(unet_path, model_options=model_options)
+        # Load state dict with guaranteed float32 scales using our loader
+        try:
+            from ..utils.safetensors_loader import load_fp8_state_dict
+            sd, metadata = load_fp8_state_dict(unet_path, force_scale_float32=True)
+            logging.info("QuantizedUNETLoader: Loaded state dict with float32 scales")
+        except Exception as e:
+            # Fallback to standard loading
+            logging.warning(f"QuantizedUNETLoader: Custom loader failed, using fallback: {e}")
+            sd = comfy.utils.load_torch_file(unet_path, safe_load=True)
+
+        # Use load_diffusion_model_state_dict to build model from our state dict
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options)
 
         return (model,)
 

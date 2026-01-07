@@ -11,23 +11,199 @@ All layouts are lazy-loaded to avoid import errors when optional dependencies
 
 import logging
 
+# =============================================================================
+# Module-level state for comfy-kitchen backend integration
+# =============================================================================
 
-# Register layouts into ComfyUI's registry
-# This happens at import time, before any model loading
-def _register_layouts():
-    """Register our custom layouts into ComfyUI's LAYOUTS and QUANT_ALGOS dicts."""
+_CK_AVAILABLE = False
+_CK_TRITON_AVAILABLE = False
+
+
+def is_ck_triton_available() -> bool:
+    """Check if comfy-kitchen triton backend is available and enabled."""
+    return _CK_TRITON_AVAILABLE
+
+
+# =============================================================================
+# Backend Setup
+# =============================================================================
+
+
+def _setup_comfy_kitchen_backends():
+    """
+    Configure comfy-kitchen backends for QuantOps.
+    
+    1. Re-enable triton backend (ComfyUI disables it by default)
+    2. Register QuantOps kernels as a custom backend
+    """
+    global _CK_AVAILABLE, _CK_TRITON_AVAILABLE
+    
     try:
-        from comfy.quant_ops import LAYOUTS, QUANT_ALGOS
+        import comfy_kitchen as ck
+        _CK_AVAILABLE = True
+    except ImportError:
+        logging.debug("ComfyUI-QuantOps: comfy-kitchen not available")
+        _CK_AVAILABLE = False
+        _CK_TRITON_AVAILABLE = False
+        return
+    
+    # Step 1: Re-enable triton backend (ComfyUI disables it)
+    try:
+        ck.enable_backend("triton")
+        
+        backends = ck.list_backends()
+        triton_info = backends.get("triton", {})
+        
+        if triton_info.get("available") and not triton_info.get("disabled"):
+            _CK_TRITON_AVAILABLE = True
+            logging.info("ComfyUI-QuantOps: Enabled comfy-kitchen triton backend")
+        else:
+            unavail_reason = triton_info.get("unavailable_reason", "unknown")
+            logging.info(f"ComfyUI-QuantOps: comfy-kitchen triton unavailable: {unavail_reason}")
+            _CK_TRITON_AVAILABLE = False
+            
+    except Exception as e:
+        logging.warning(f"ComfyUI-QuantOps: Failed to enable ck triton backend: {e}")
+        _CK_TRITON_AVAILABLE = False
+    
+    # Step 2: Register QuantOps kernels as a custom backend
+    _register_quantops_backend()
+
+
+def _register_quantops_backend():
+    """
+    Register QuantOps Triton kernels with comfy-kitchen registry.
+    
+    This allows ck dispatch to use our INT8/FP8 kernels.
+    """
+    try:
+        import torch
+        from comfy_kitchen.registry import registry
+        from comfy_kitchen.constraints import (
+            FunctionConstraints,
+            ParamConstraint,
+            ExactDims,
+            DivisibleBy,
+        )
+        
+        # Import our kernel module
+        from .kernels import int8_kernels
+        from .kernels import fp8_kernels
+        
+        cuda_devices = frozenset({"cuda"})
+        standard_floats = frozenset({torch.float32, torch.float16, torch.bfloat16})
+        
+        # Build constraints for INT8 kernels
+        int8_constraints = {
+            "act_quant": FunctionConstraints(
+                params={
+                    "x": ParamConstraint(
+                        dtypes=standard_floats,
+                        shape_rules=(DivisibleBy(-1, 128),),  # Last dim divisible by block_size
+                    ),
+                },
+                default_devices=cuda_devices,
+            ),
+            "act_dequant": FunctionConstraints(
+                params={
+                    "x": ParamConstraint(dtypes=frozenset({torch.int8})),
+                    "s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                },
+                default_devices=cuda_devices,
+            ),
+            "weight_quant": FunctionConstraints(
+                params={
+                    "x": ParamConstraint(
+                        dtypes=standard_floats,
+                        shape_rules=(ExactDims(2),),
+                    ),
+                },
+                default_devices=cuda_devices,
+            ),
+            "weight_dequant": FunctionConstraints(
+                params={
+                    "x": ParamConstraint(dtypes=frozenset({torch.int8})),
+                    "s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                },
+                default_devices=cuda_devices,
+            ),
+        }
+        
+        # Build constraints for FP8 kernels
+        fp8_constraints = {
+            "fp8_act_quant": FunctionConstraints(
+                params={
+                    "x": ParamConstraint(dtypes=standard_floats),
+                },
+                default_devices=cuda_devices,
+            ),
+            "fp8_gemm_blockwise": FunctionConstraints(
+                params={
+                    "a": ParamConstraint(dtypes=frozenset({torch.float8_e4m3fn})),
+                    "b": ParamConstraint(dtypes=frozenset({torch.float8_e4m3fn})),
+                    "a_s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                    "b_s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                },
+                default_devices=cuda_devices,
+            ),
+            "fp8_gemm_rowwise": FunctionConstraints(
+                params={
+                    "a": ParamConstraint(dtypes=frozenset({torch.float8_e4m3fn})),
+                    "b": ParamConstraint(dtypes=frozenset({torch.float8_e4m3fn})),
+                    "a_s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                    "b_s": ParamConstraint(dtypes=frozenset({torch.float32})),
+                },
+                default_devices=cuda_devices,
+            ),
+        }
+        
+        # Register INT8 backend
+        try:
+            registry.register(
+                name="quantops_int8",
+                module=int8_kernels,
+                capabilities=int8_constraints,
+            )
+            logging.info("ComfyUI-QuantOps: Registered quantops_int8 backend")
+        except Exception as e:
+            logging.debug(f"ComfyUI-QuantOps: Could not register INT8 backend: {e}")
+        
+        # Register FP8 backend
+        try:
+            registry.register(
+                name="quantops_fp8",
+                module=fp8_kernels,
+                capabilities=fp8_constraints,
+            )
+            logging.info("ComfyUI-QuantOps: Registered quantops_fp8 backend")
+        except Exception as e:
+            logging.debug(f"ComfyUI-QuantOps: Could not register FP8 backend: {e}")
+            
+    except ImportError as e:
+        logging.debug(f"ComfyUI-QuantOps: Could not register backends (missing deps): {e}")
+    except Exception as e:
+        logging.warning(f"ComfyUI-QuantOps: Backend registration failed: {e}")
+
+
+# =============================================================================
+# Layout Registration
+# =============================================================================
+
+
+def _register_layouts():
+    """Register our custom layouts into ComfyUI's layout registry and QUANT_ALGOS dict."""
+    try:
+        from comfy.quant_ops import QUANT_ALGOS, register_layout_class
         import torch
 
         # Import our layouts (this also registers their operation handlers)
         from .quant_layouts.int8_layout import BlockWiseINT8Layout
         from .quant_layouts.fp8_variants import RowWiseFP8Layout, BlockWiseFP8Layout
 
-        # Register layouts (use setdefault to not override if already present)
-        LAYOUTS.setdefault("BlockWiseINT8Layout", BlockWiseINT8Layout)
-        LAYOUTS.setdefault("RowWiseFP8Layout", RowWiseFP8Layout)
-        LAYOUTS.setdefault("BlockWiseFP8Layout", BlockWiseFP8Layout)
+        # Register layouts using the new comfy_kitchen API
+        register_layout_class("BlockWiseINT8Layout", BlockWiseINT8Layout)
+        register_layout_class("RowWiseFP8Layout", RowWiseFP8Layout)
+        register_layout_class("BlockWiseFP8Layout", BlockWiseFP8Layout)
 
         # Register QUANT_ALGOS
         QUANT_ALGOS.setdefault(
@@ -58,16 +234,29 @@ def _register_layouts():
             },
         )
 
-        logging.info(f"ComfyUI-QuantOps: Registered layouts: {list(LAYOUTS.keys())}")
+        # Verify registration
+        registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout"]
+        logging.info(f"ComfyUI-QuantOps: Registered layouts: {registered}")
 
     except Exception as e:
         logging.error(f"ComfyUI-QuantOps: Failed to register layouts: {e}")
 
 
-# Register layouts on import
+# =============================================================================
+# Module Initialization
+# =============================================================================
+
+# Setup backends first (enables ck triton, registers our kernels)
+_setup_comfy_kitchen_backends()
+
+# Register layouts
 _register_layouts()
 
 # Import nodes for ComfyUI discovery
 from .nodes.loader_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = [
+    "NODE_CLASS_MAPPINGS",
+    "NODE_DISPLAY_NAME_MAPPINGS",
+    "is_ck_triton_available",
+]
