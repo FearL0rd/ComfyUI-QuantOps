@@ -89,12 +89,14 @@ class HybridINT8Ops(manual_cast):
                     
                     if scale is not None and _HAS_INT8_LAYOUT:
                         # Create QuantizedTensor with BlockWiseINT8Layout
-                        layout_params = {
-                            'scale': scale.to(torch.float32),
-                            'block_size': self.block_size,
-                            'is_weight': True,
-                            'orig_dtype': torch.bfloat16,  # Will be updated in forward
-                        }
+                        from .quant_layouts.int8_layout import BlockWiseINT8Layout
+                        layout_params = BlockWiseINT8Layout.Params(
+                            scale=scale.to(torch.float32),
+                            orig_dtype=torch.bfloat16,  # Will be updated in forward
+                            orig_shape=tuple(weight_tensor.shape),
+                            block_size=self.block_size,
+                            is_weight=True,
+                        )
                         self.weight = torch.nn.Parameter(
                             QuantizedTensor(weight_tensor, "BlockWiseINT8Layout", layout_params),
                             requires_grad=False

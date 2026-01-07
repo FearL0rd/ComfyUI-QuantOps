@@ -128,25 +128,36 @@ class HybridFP8Ops(manual_cast):
                         )
                         self.layout_type = "TensorCoreFP8Layout"
 
-                    # Build layout_params with correct block_size
-                    layout_params = {
-                        "scale": scale.to(torch.float32) if scale is not None else None,
-                        "orig_dtype": torch.bfloat16,  # Will be updated in forward
-                    }
 
-                    # Add block_size for layouts that need it
-                    if self.layout_type in [
-                        "BlockWiseFP8Layout",
-                        "BlockWiseINT8Layout",
-                    ]:
-                        if self.block_size is not None:
-                            layout_params["block_size"] = self.block_size
-                        else:
-                            # Last resort fallback
-                            layout_params["block_size"] = 64
+                    # Create layout_params based on layout_type
+                    if self.layout_type == "BlockWiseFP8Layout":
+                        from .quant_layouts.fp8_variants import BlockWiseFP8Layout
+                        block_size = self.block_size if self.block_size is not None else 64
+                        if self.block_size is None:
                             logging.warning(
                                 f"HybridFP8Ops: No block_size found for {prefix}, using fallback 64"
                             )
+                        layout_params = BlockWiseFP8Layout.Params(
+                            scale=scale.to(torch.float32) if scale is not None else None,
+                            orig_dtype=torch.bfloat16,
+                            orig_shape=tuple(weight_tensor.shape),
+                            block_size=block_size,
+                        )
+                    elif self.layout_type == "RowWiseFP8Layout":
+                        from .quant_layouts.fp8_variants import RowWiseFP8Layout
+                        layout_params = RowWiseFP8Layout.Params(
+                            scale=scale.to(torch.float32) if scale is not None else None,
+                            orig_dtype=torch.bfloat16,
+                            orig_shape=tuple(weight_tensor.shape),
+                        )
+                    else:
+                        # TensorCoreFP8Layout or other - use comfy's layout
+                        from comfy.quant_ops import TensorCoreFP8Layout
+                        layout_params = TensorCoreFP8Layout.Params(
+                            scale=scale.to(torch.float32) if scale is not None else None,
+                            orig_dtype=torch.bfloat16,
+                            orig_shape=tuple(weight_tensor.shape),
+                        )
 
                     # Create QuantizedTensor
                     self.weight = torch.nn.Parameter(
