@@ -199,7 +199,7 @@ class HybridFP8Ops(manual_cast):
 
                 # Update orig_dtype for dequantization
                 if hasattr(weight, "_params"):
-                    weight._params.orig_dtype = input_dtype
+                    object.__setattr__(weight._params, "orig_dtype", input_dtype)
 
                 bias = self.bias
                 if bias is not None:
