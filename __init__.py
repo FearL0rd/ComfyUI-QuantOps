@@ -234,8 +234,26 @@ def _register_layouts():
             },
         )
 
+        # MXFP8 from comfy_kitchen
+        try:
+            from comfy_kitchen.tensor import TensorCoreMXFP8Layout
+            register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
+            logging.info("ComfyUI-QuantOps: Registered TensorCoreMXFP8Layout")
+        except ImportError:
+            logging.debug("ComfyUI-QuantOps: TensorCoreMXFP8Layout not available")
+
+        QUANT_ALGOS.setdefault(
+            "mxfp8",
+            {
+                "storage_t": torch.float8_e4m3fn,
+                "parameters": {"weight_scale"},
+                "comfy_tensor_layout": "TensorCoreMXFP8Layout",
+                "group_size": 32,
+            },
+        )
+
         # Verify registration
-        registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout"]
+        registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
         logging.info(f"ComfyUI-QuantOps: Registered layouts: {registered}")
 
     except Exception as e:

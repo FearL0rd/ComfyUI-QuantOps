@@ -132,21 +132,25 @@ class HybridFP8Ops(manual_cast):
 
                     # Create layout_params based on layout_type
                     if self.layout_type == "TensorCoreMXFP8Layout":
-                        from .quant_layouts.mxfp8_layout import TensorCoreMXFP8Layout
+                        from comfy_kitchen.tensor import TensorCoreMXFP8Layout
                         # Get orig_dtype from comfy_quant metadata if available
                         orig_dtype_str = layer_conf.get("orig_dtype", "torch.bfloat16") if layer_conf else "torch.bfloat16"
-                        if orig_dtype_str == "torch.bfloat16":
-                            orig_dtype = torch.bfloat16
-                        elif orig_dtype_str == "torch.float16":
-                            orig_dtype = torch.float16
-                        else:
-                            orig_dtype = torch.bfloat16
+                        DTYPE_MAP = {
+                            "torch.bfloat16": torch.bfloat16,
+                            "torch.float16": torch.float16,
+                            "torch.float32": torch.float32,
+                        }
+                        orig_dtype = DTYPE_MAP.get(orig_dtype_str, torch.bfloat16)
                         
                         # Get orig_shape from metadata or use current shape
                         orig_shape = tuple(layer_conf.get("orig_shape", list(weight_tensor.shape))) if layer_conf else tuple(weight_tensor.shape)
                         
+                        # Convert E8M0 scales from uint8 to float8_e8m0fnu (safetensors stores as uint8)
+                        if scale is not None and scale.dtype == torch.uint8:
+                            scale = scale.view(torch.float8_e8m0fnu)
+                        
                         layout_params = TensorCoreMXFP8Layout.Params(
-                            scale=scale,  # E8M0 as uint8
+                            scale=scale,
                             orig_dtype=orig_dtype,
                             orig_shape=orig_shape,
                         )
@@ -227,6 +231,26 @@ class HybridFP8Ops(manual_cast):
                 bias = self.bias
                 if bias is not None:
                     bias = bias.to(device=input.device, dtype=input_dtype)
+
+                # For MXFP8: quantize input to QuantizedTensor so handler uses scaled_mm
+                if self.layout_type == "TensorCoreMXFP8Layout":
+                    input_shape = input.shape
+                    tensor_3d = input.ndim == 3
+                    
+                    if tensor_3d:
+                        input = input.reshape(-1, input_shape[2])
+                    
+                    if input.ndim == 2:
+                        input = QuantizedTensor.from_float(input, "TensorCoreMXFP8Layout")
+                        output = torch.nn.functional.linear(input, weight, bias)
+                        if tensor_3d:
+                            output = output.reshape(input_shape[0], input_shape[1], -1)
+                        return output
+                    else:
+                        # Fallback for non-2D: dequantize weight
+                        return torch.nn.functional.linear(
+                            input.reshape(input_shape), weight.dequantize(), bias
+                        )
 
                 # This triggers QuantizedTensor dispatch -> layout-specific handler
                 return torch.nn.functional.linear(input, weight, bias)
