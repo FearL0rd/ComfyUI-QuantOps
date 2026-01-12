@@ -129,8 +129,31 @@ class HybridFP8Ops(manual_cast):
                         self.layout_type = "TensorCoreFP8Layout"
 
 
+
                     # Create layout_params based on layout_type
-                    if self.layout_type == "BlockWiseFP8Layout":
+                    if self.layout_type == "TensorCoreMXFP8Layout":
+                        from .quant_layouts.mxfp8_layout import TensorCoreMXFP8Layout
+                        # Get orig_dtype from comfy_quant metadata if available
+                        orig_dtype_str = layer_conf.get("orig_dtype", "torch.bfloat16") if layer_conf else "torch.bfloat16"
+                        if orig_dtype_str == "torch.bfloat16":
+                            orig_dtype = torch.bfloat16
+                        elif orig_dtype_str == "torch.float16":
+                            orig_dtype = torch.float16
+                        else:
+                            orig_dtype = torch.bfloat16
+                        
+                        # Get orig_shape from metadata or use current shape
+                        orig_shape = tuple(layer_conf.get("orig_shape", list(weight_tensor.shape))) if layer_conf else tuple(weight_tensor.shape)
+                        
+                        layout_params = TensorCoreMXFP8Layout.Params(
+                            scale=scale,  # E8M0 as uint8
+                            orig_dtype=orig_dtype,
+                            orig_shape=orig_shape,
+                        )
+                        logging.debug(
+                            f"HybridFP8Ops: Loading MXFP8 layer {prefix}, scale shape={scale.shape if scale is not None else None}"
+                        )
+                    elif self.layout_type == "BlockWiseFP8Layout":
                         from .quant_layouts.fp8_variants import BlockWiseFP8Layout
                         block_size = self.block_size if self.block_size is not None else 64
                         if self.block_size is None:
