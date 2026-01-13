@@ -252,6 +252,17 @@ def _register_layouts():
             },
         )
 
+        # NVFP4: Don't register layout (ComfyUI core does this), just add QUANT_ALGOS entry if missing
+        QUANT_ALGOS.setdefault(
+            "nvfp4",
+            {
+                "storage_t": torch.uint8,
+                "parameters": {"weight_scale", "weight_scale_2"},
+                "comfy_tensor_layout": "TensorCoreNVFP4Layout",
+                "group_size": 16,
+            },
+        )
+
         # Verify registration
         registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
         logging.info(f"ComfyUI-QuantOps: Registered layouts: {registered}")

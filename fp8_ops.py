@@ -50,8 +50,11 @@ class HybridFP8Ops(manual_cast):
             """
             weight_key = prefix + "weight"
 
-            # Get weight_scale
+            # Get weight_scale (block scale for NVFP4, tensor scale for FP8)
             scale = state_dict.pop(prefix + "weight_scale", None)
+            
+            # Get weight_scale_2 (per-tensor scale for NVFP4)
+            scale_2 = state_dict.pop(prefix + "weight_scale_2", None)
 
             # Remove input_scale if present (not used for weight dequantization)
             state_dict.pop(prefix + "input_scale", None)
@@ -79,8 +82,53 @@ class HybridFP8Ops(manual_cast):
             weight_tensor = state_dict.pop(weight_key, None)
 
             if weight_tensor is not None:
+                # Check if this is NVFP4 (uint8 packed format with scale_2)
+                is_nvfp4 = (
+                    self.quant_format == "nvfp4" or 
+                    (weight_tensor.dtype == torch.uint8 and scale_2 is not None)
+                )
+                
+                if is_nvfp4:
+                    self.is_quantized = True
+                    self.layout_type = "TensorCoreNVFP4Layout"
+                    self.block_size = 16  # NVFP4 uses 16x16 blocks
+                    
+                    from comfy_kitchen.tensor import TensorCoreNVFP4Layout
+                    
+                    # Get orig_dtype from metadata or default to bfloat16
+                    orig_dtype_str = layer_conf.get("orig_dtype", "torch.bfloat16") if layer_conf else "torch.bfloat16"
+                    DTYPE_MAP = {
+                        "torch.bfloat16": torch.bfloat16,
+                        "torch.float16": torch.float16,
+                        "torch.float32": torch.float32,
+                    }
+                    orig_dtype = DTYPE_MAP.get(orig_dtype_str, torch.bfloat16)
+                    
+                    # Get orig_shape from metadata or compute from packed storage
+                    if layer_conf and "orig_shape" in layer_conf:
+                        orig_shape = tuple(layer_conf["orig_shape"])
+                    else:
+                        # NVFP4 packs 2 values per byte: logical cols = storage cols * 2
+                        orig_shape = (weight_tensor.shape[0], weight_tensor.shape[1] * 2)
+                    
+                    # scale = block_scale (FP8 E4M3), scale_2 = per-tensor scale (float32)
+                    layout_params = TensorCoreNVFP4Layout.Params(
+                        scale=scale_2.to(torch.float32) if scale_2 is not None else torch.tensor(1.0),
+                        orig_dtype=orig_dtype,
+                        orig_shape=orig_shape,
+                        block_scale=scale,  # FP8 E4M3 block scales
+                    )
+                    
+                    self.weight = torch.nn.Parameter(
+                        QuantizedTensor(weight_tensor, self.layout_type, layout_params),
+                        requires_grad=False,
+                    )
+                    logging.debug(
+                        f"HybridFP8Ops: Loaded NVFP4 layer {prefix}, block_scale shape={scale.shape if scale is not None else None}"
+                    )
+                
                 # Check if this is an FP8 tensor
-                if weight_tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+                elif weight_tensor.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
                     self.is_quantized = True
                     self.scale_weight = scale
 
@@ -251,6 +299,27 @@ class HybridFP8Ops(manual_cast):
                         return torch.nn.functional.linear(
                             input.reshape(input_shape), weight.dequantize(), bias
                         )
+
+                # For NVFP4: quantize input to QuantizedTensor so handler uses scaled_mm_nvfp4
+                if self.layout_type == "TensorCoreNVFP4Layout":
+                    input_shape = input.shape
+                    tensor_3d = input.ndim == 3
+                    
+                    if tensor_3d:
+                        input = input.reshape(-1, input_shape[2])
+                    
+                    if input.ndim == 2:
+                        input = QuantizedTensor.from_float(input, "TensorCoreNVFP4Layout")
+                        output = torch.nn.functional.linear(input, weight, bias)
+                        if tensor_3d:
+                            output = output.reshape(input_shape[0], input_shape[1], -1)
+                        return output
+                    else:
+                        # Fallback for non-2D: dequantize weight
+                        return torch.nn.functional.linear(
+                            input.reshape(input_shape), weight.dequantize(), bias
+                        )
+
 
                 # This triggers QuantizedTensor dispatch -> layout-specific handler
                 return torch.nn.functional.linear(input, weight, bias)
