@@ -93,7 +93,7 @@ class HybridFP8Ops(manual_cast):
                     self.layout_type = "TensorCoreNVFP4Layout"
                     self.block_size = 16  # NVFP4 uses 16x16 blocks
                     
-                    from comfy_kitchen.tensor import TensorCoreNVFP4Layout
+                    from comfy.quant_ops import TensorCoreNVFP4Layout
                     
                     # Get orig_dtype from metadata or default to bfloat16
                     orig_dtype_str = layer_conf.get("orig_dtype", "torch.bfloat16") if layer_conf else "torch.bfloat16"
