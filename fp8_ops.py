@@ -362,18 +362,28 @@ class HybridFP8Ops(manual_cast):
         def set_weight(
             self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs
         ):
-            """Set weight after LoRA patching."""
+            """Set weight after LoRA patching - requantize if layout is available."""
+            if getattr(self, 'layout_type', None) is not None:
+                # Requantize using the layout's quantize method
+                weight = QuantizedTensor.from_float(
+                    weight, 
+                    self.layout_type, 
+                    scale="recalculate", 
+                    stochastic_rounding=seed if seed else 0,
+                    inplace_ops=True
+                )
+                # Match the weight dtype for proper dispatch
+                if hasattr(self.weight, 'dtype'):
+                    weight = weight.to(self.weight.dtype)
+            else:
+                # Non-quantized path
+                weight = weight.to(self.weight.dtype)
+
             if return_weight:
                 return weight
 
-            if inplace_update:
-                self.weight.data.copy_(weight)
-            else:
-                self.weight = torch.nn.Parameter(weight, requires_grad=False)
-
-            # Mark as no longer quantized after patching
-            self.is_quantized = False
-            self.scale_weight = None
+            assert inplace_update is False  # Inplace update not supported with requant
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
     # Normalization layers - use standard manual_cast versions
     class GroupNorm(manual_cast.GroupNorm):
