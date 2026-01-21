@@ -167,13 +167,7 @@ def tensorwise_int8_linear(func, args, kwargs):
     orig_shape = input_tensor.shape
     x_2d = input_tensor.reshape(-1, orig_shape[-1])
 
-    # Small batch fallback (kernel overhead dominates)
-    if x_2d.shape[0] <= 16:
-        weight_fp = dequantize(weight_int8, weight_scale).to(input_tensor.dtype)
-        result = torch.nn.functional.linear(input_tensor, weight_fp, bias)
-        return result
-
-    # Try Triton kernel first, then torch._int_mm fallback
+    # Always use INT8 matmul (no dequantize fallback to prevent OOM)
     result = _tensorwise_int8_matmul(x_2d, weight_int8, weight_scale)
 
     # Cast to output dtype

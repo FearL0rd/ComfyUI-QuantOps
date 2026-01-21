@@ -147,25 +147,19 @@ class TensorWiseInt8Ops(manual_cast):
             # Move weight to input device
             weight = self.weight.data.to(device=input.device)
 
-            # Small batch optimization (kernel overhead dominates)
-            if x_2d.shape[0] <= 16:
-                w_float = dequantize(weight, self.weight_scale).to(input.dtype)
-                bias = self.bias.to(device=input.device, dtype=input.dtype) if self.bias is not None else None
-                y = F.linear(x_2d, w_float, bias)
+            # Always use INT8 matmul (no dequantize fallback to prevent OOM)
+            if self.input_scale is not None:
+                # Static quantization path
+                y = _int8_forward_static(
+                    x_2d, weight, self.weight_scale,
+                    self.input_scale, self.bias, compute_dtype
+                )
             else:
-                # Dynamic or static activation quantization
-                if self.input_scale is not None:
-                    # Static quantization path
-                    y = _int8_forward_static(
-                        x_2d, weight, self.weight_scale,
-                        self.input_scale, self.bias, compute_dtype
-                    )
-                else:
-                    # Dynamic activation quantization (default)
-                    y = _int8_forward_dynamic(
-                        x_2d, weight, self.weight_scale,
-                        self.bias, compute_dtype
-                    )
+                # Dynamic activation quantization (default)
+                y = _int8_forward_dynamic(
+                    x_2d, weight, self.weight_scale,
+                    self.bias, compute_dtype
+                )
 
             # Reshape back
             return y.reshape(*x_shape[:-1], y.shape[-1])
@@ -201,25 +195,19 @@ class TensorWiseInt8Ops(manual_cast):
             # Move weight to input device
             weight = self.weight.data.to(device=input.device)
 
-            # 1. Base INT8 output (no LoRA applied)
-            if x_2d.shape[0] <= 16:
-                # Small batch - dequant fallback
-                w_float = dequantize(weight, self.weight_scale).to(input_dtype)
-                base_out = F.linear(x_2d, w_float, None)
+            # 1. Base INT8 output (no LoRA applied) - always use INT8 matmul
+            if self.input_scale is not None:
+                base_out = _int8_forward_static(
+                    x_2d, weight, self.weight_scale,
+                    self.input_scale, None, compute_dtype
+                )
             else:
-                # Large batch - native INT8 matmul
-                if self.input_scale is not None:
-                    base_out = _int8_forward_static(
-                        x_2d, weight, self.weight_scale,
-                        self.input_scale, None, compute_dtype
-                    )
-                else:
-                    base_out = _int8_forward_dynamic(
-                        x_2d, weight, self.weight_scale,
-                        None, compute_dtype
-                    )
+                base_out = _int8_forward_dynamic(
+                    x_2d, weight, self.weight_scale,
+                    None, compute_dtype
+                )
 
-            # 2. Compute LoRA contributions separately
+            # 2. Compute LoRA contributions separately (LoRA weights are small, no OOM risk)
             lora_out = None
             for patch_fn in self.weight_function:
                 if isinstance(patch_fn, LowVramPatch):
@@ -255,25 +243,18 @@ class TensorWiseInt8Ops(manual_cast):
                             else:
                                 lora_out = lora_out + lora_contrib
                         else:
-                            # Fallback for non-LoRA adapters: apply the patch function to dequantized weight
-                            logging.warning(f"TensorWiseINT8 Fused LoRA: Falling back to dequant for non-LoRA adapter")
-                            weight_fp = self._dequantize_weight(weight, self.weight_scale, input_dtype)
-                            patched_weight = patch_fn(weight_fp)
-                            lora_contrib = F.linear(x_2d, patched_weight - weight_fp, None)
-                            if lora_out is None:
-                                lora_out = lora_contrib
-                            else:
-                                lora_out = lora_out + lora_contrib
+                            # Non-LoRA adapter without decomposed weights - cannot apply without dequant
+                            raise RuntimeError(
+                                f"TensorWiseINT8: Unsupported adapter type (no decomposed weights). "
+                                f"Cannot apply to INT8 quantized model without dequantization. "
+                                f"Adapter: {type(adapter).__name__}"
+                            )
                 else:
-                    # Non-LowVramPatch function - fall back to calling it
-                    logging.warning(f"TensorWiseINT8 Fused LoRA: Unknown patch function type, falling back")
-                    weight_fp = self._dequantize_weight(weight, self.weight_scale, input_dtype)
-                    patched_weight = patch_fn(weight_fp)
-                    lora_contrib = F.linear(x_2d, patched_weight - weight_fp, None)
-                    if lora_out is None:
-                        lora_out = lora_contrib
-                    else:
-                        lora_out = lora_out + lora_contrib
+                    # Non-LowVramPatch function - unsupported
+                    raise RuntimeError(
+                        f"TensorWiseINT8: Unsupported patch function type: {type(patch_fn).__name__}. "
+                        f"Only LowVramPatch with decomposed LoRA weights is supported for INT8 models."
+                    )
 
             # 3. Combine base + LoRA
             out = base_out
