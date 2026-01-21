@@ -37,7 +37,7 @@ class QuantizedModelLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
             "optional": {
@@ -54,7 +54,7 @@ class QuantizedModelLoader:
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
     FUNCTION = "load_checkpoint"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load checkpoints with custom quantization support. float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
+    DESCRIPTION = "Load checkpoints with custom quantization support. int8_tensorwise uses torch._int_mm for fast inference."
 
 
     def load_checkpoint(
@@ -62,8 +62,8 @@ class QuantizedModelLoader:
     ):
         """Load a checkpoint with the specified quantization format and kernel backend."""
 
-        # Set the kernel backend for INT8 layout (only affects INT8 models)
-        if quant_format in ("auto", "int8"):
+        # Set the kernel backend for INT8 blockwise layout (only affects blockwise)
+        if quant_format == "int8":
             try:
                 from ..quant_layouts.int8_layout import BlockWiseINT8Layout
 
@@ -80,7 +80,17 @@ class QuantizedModelLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format == "int8":
+        if quant_format == "int8_tensorwise":
+            try:
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+
+                model_options = {"custom_operations": TensorWiseInt8Ops}
+                logging.info(
+                    "QuantizedModelLoader: Using TensorWiseInt8Ops (torch._int_mm)"
+                )
+            except ImportError as e:
+                logging.warning(f"TensorWiseInt8Ops not available: {e}")
+        elif quant_format == "int8":
             try:
                 from ..int8_ops import HybridINT8Ops
 
@@ -108,12 +118,12 @@ class QuantizedModelLoader:
             except ImportError as e:
                 logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
-            # Try INT8 as fallback for auto mode
+            # Try tensorwise INT8 first for auto mode
             try:
-                from ..int8_ops import HybridINT8Ops
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
 
-                model_options = {"custom_operations": HybridINT8Ops}
-                logging.info("QuantizedModelLoader: Auto-selected HybridINT8Ops")
+                model_options = {"custom_operations": TensorWiseInt8Ops}
+                logging.info("QuantizedModelLoader: Auto-selected TensorWiseInt8Ops")
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 
@@ -170,7 +180,7 @@ class QuantizedUNETLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -178,13 +188,13 @@ class QuantizedUNETLoader:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load diffusion models with custom quantization support. float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
+    DESCRIPTION = "Load diffusion models with custom quantization support. int8_tensorwise uses torch._int_mm for fast inference."
 
     def load_unet(self, unet_name, quant_format, kernel_backend):
         """Load a UNET model with the specified settings."""
 
-        # Set kernel backend (only for INT8 format)
-        if quant_format in ("auto", "int8"):
+        # Set kernel backend (only for INT8 blockwise format)
+        if quant_format == "int8":
             try:
                 from ..quant_layouts.int8_layout import BlockWiseINT8Layout
 
@@ -201,7 +211,15 @@ class QuantizedUNETLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format == "int8":
+        if quant_format == "int8_tensorwise":
+            try:
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+
+                model_options = {"custom_operations": TensorWiseInt8Ops}
+                logging.info("QuantizedUNETLoader: Using TensorWiseInt8Ops (torch._int_mm)")
+            except ImportError as e:
+                logging.warning(f"TensorWiseInt8Ops not available: {e}")
+        elif quant_format == "int8":
             try:
                 from ..int8_ops import HybridINT8Ops
 
@@ -227,10 +245,10 @@ class QuantizedUNETLoader:
                 logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
             try:
-                from ..int8_ops import HybridINT8Ops
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
 
-                model_options = {"custom_operations": HybridINT8Ops}
-                logging.info("QuantizedUNETLoader: Auto-selected HybridINT8Ops")
+                model_options = {"custom_operations": TensorWiseInt8Ops}
+                logging.info("QuantizedUNETLoader: Auto-selected TensorWiseInt8Ops")
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 
@@ -292,7 +310,7 @@ class QuantizedCLIPLoader:
             "required": {
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (cls.CLIP_TYPES,),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -300,14 +318,14 @@ class QuantizedCLIPLoader:
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load quantized text encoders (CLIP, T5, etc.). float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
+    DESCRIPTION = "Load quantized text encoders (CLIP, T5, etc.). int8_tensorwise uses torch._int_mm for fast inference."
 
     def load_clip(self, clip_name, type, quant_format, kernel_backend):
         """Load a CLIP/text encoder with quantization support."""
         import comfy.model_management
 
-        # Configure INT8 kernel backend (only affects INT8 models)
-        if quant_format in ("auto", "int8"):
+        # Configure INT8 kernel backend (only affects INT8 blockwise models)
+        if quant_format == "int8":
             try:
                 from ..quant_layouts.int8_layout import BlockWiseINT8Layout
 
@@ -335,7 +353,17 @@ class QuantizedCLIPLoader:
             "initial_device": comfy.model_management.text_encoder_offload_device()
         }
 
-        if quant_format == "int8":
+        if quant_format == "int8_tensorwise":
+            try:
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+
+                model_options["custom_operations"] = TensorWiseInt8Ops
+                logging.info(
+                    "QuantizedCLIPLoader: Using TensorWiseInt8Ops (torch._int_mm)"
+                )
+            except ImportError as e:
+                logging.warning(f"TensorWiseInt8Ops not available: {e}")
+        elif quant_format == "int8":
             try:
                 from ..int8_ops import HybridINT8Ops
 
@@ -362,12 +390,12 @@ class QuantizedCLIPLoader:
             except ImportError as e:
                 logging.warning(f"HybridFP8Ops not available: {e}")
         else:  # auto
-            # Try INT8 as fallback for auto mode
+            # Try tensorwise INT8 for auto mode
             try:
-                from ..int8_ops import HybridINT8Ops
+                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
 
-                model_options["custom_operations"] = HybridINT8Ops
-                logging.info("QuantizedCLIPLoader: Auto-selected HybridINT8Ops")
+                model_options["custom_operations"] = TensorWiseInt8Ops
+                logging.info("QuantizedCLIPLoader: Auto-selected TensorWiseInt8Ops")
             except ImportError as e:
                 logging.warning(f"No quantized ops available: {e}")
 

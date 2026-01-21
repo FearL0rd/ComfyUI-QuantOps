@@ -199,13 +199,23 @@ def _register_layouts():
         # Import our layouts (this also registers their operation handlers)
         from .quant_layouts.int8_layout import BlockWiseINT8Layout
         from .quant_layouts.fp8_variants import RowWiseFP8Layout, BlockWiseFP8Layout
+        from .quant_layouts.tensorwise_int8_layout import TensorWiseInt8Layout
 
         # Register layouts using the new comfy_kitchen API
         register_layout_class("BlockWiseINT8Layout", BlockWiseINT8Layout)
         register_layout_class("RowWiseFP8Layout", RowWiseFP8Layout)
         register_layout_class("BlockWiseFP8Layout", BlockWiseFP8Layout)
+        register_layout_class("TensorWiseInt8Layout", TensorWiseInt8Layout)
 
         # Register QUANT_ALGOS
+        QUANT_ALGOS.setdefault(
+            "int8_tensorwise",
+            {
+                "storage_t": torch.int8,
+                "parameters": {"weight_scale"},
+                "comfy_tensor_layout": "TensorWiseInt8Layout",
+            },
+        )
         QUANT_ALGOS.setdefault(
             "int8_blockwise",
             {
