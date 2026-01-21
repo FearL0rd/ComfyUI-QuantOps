@@ -202,7 +202,7 @@ def _tensorwise_int8_matmul(x: torch.Tensor, weight_int8: torch.Tensor, weight_s
     """
     # Try Triton kernel if available
     try:
-        from .tensorwise_kernels import mm_8bit_triton
+        from ..kernels.tensorwise_kernels import mm_8bit_triton
         if mm_8bit_triton is not None and x.is_cuda:
             # Quantize activations per-row
             x_int8, x_scale = quantize_int8_axiswise(x, dim=-1)
