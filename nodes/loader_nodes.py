@@ -82,7 +82,7 @@ class QuantizedModelLoader:
         model_options = {}
         if quant_format == "int8_tensorwise":
             try:
-                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                from ..tensorwise_int8_ops import TensorWiseInt8Ops
 
                 model_options = {"custom_operations": TensorWiseInt8Ops}
                 logging.info(
@@ -128,7 +128,7 @@ class QuantizedModelLoader:
 
                 # Select ops based on detected format
                 if detected_format == "int8_tensorwise":
-                    from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
                     model_options = {"custom_operations": TensorWiseInt8Ops}
                 elif detected_format == "int8_blockwise":
                     from ..int8_ops import HybridINT8Ops
@@ -223,7 +223,7 @@ class QuantizedUNETLoader:
         model_options = {}
         if quant_format == "int8_tensorwise":
             try:
-                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                from ..tensorwise_int8_ops import TensorWiseInt8Ops
 
                 model_options = {"custom_operations": TensorWiseInt8Ops}
                 logging.info("QuantizedUNETLoader: Using TensorWiseInt8Ops (torch._int_mm)")
@@ -264,7 +264,7 @@ class QuantizedUNETLoader:
 
                 # Select ops based on detected format
                 if detected_format == "int8_tensorwise":
-                    from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
                     model_options = {"custom_operations": TensorWiseInt8Ops}
                 elif detected_format == "int8_blockwise":
                     from ..int8_ops import HybridINT8Ops
@@ -376,7 +376,7 @@ class QuantizedCLIPLoader:
 
                 # Select ops based on detected format
                 if detected_format == "int8_tensorwise":
-                    from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
                     model_options["custom_operations"] = TensorWiseInt8Ops
                 elif detected_format == "int8_blockwise":
                     from ..int8_ops import HybridINT8Ops
@@ -394,7 +394,7 @@ class QuantizedCLIPLoader:
             sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
 
             if quant_format == "int8_tensorwise":
-                from ..ops.tensorwise_int8_ops import TensorWiseInt8Ops
+                from ..tensorwise_int8_ops import TensorWiseInt8Ops
                 model_options["custom_operations"] = TensorWiseInt8Ops
                 logging.info("QuantizedCLIPLoader: Using TensorWiseInt8Ops")
             elif quant_format == "int8":
