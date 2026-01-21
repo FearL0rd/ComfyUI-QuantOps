@@ -208,3 +208,123 @@ def get_layer_metadata(
             except (ValueError, json.JSONDecodeError):
                 pass
     return None
+
+
+def get_quantization_metadata(filepath: str) -> Optional[dict]:
+    """
+    Read _quantization_metadata from safetensors header without loading tensors.
+
+    Args:
+        filepath: Path to safetensors file
+
+    Returns:
+        Dict with quantization metadata or None if not found
+    """
+    try:
+        # Only read header, not tensors
+        with open(filepath, "rb") as f:
+            header_size = struct.unpack("<Q", f.read(8))[0]
+            header_json = f.read(header_size).decode("utf-8")
+
+        header = json.loads(header_json)
+        metadata = header.get("__metadata__", {})
+
+        # Look for _quantization_metadata (stored as JSON string)
+        quant_meta_str = metadata.get("_quantization_metadata")
+        if quant_meta_str:
+            return json.loads(quant_meta_str)
+
+        return None
+    except Exception:
+        return None
+
+
+def detect_quant_format(filepath: str) -> str:
+    """
+    Detect quantization format from safetensors file metadata.
+
+    Checks:
+    1. Global _quantization_metadata in __metadata__
+    2. First comfy_quant tensor if exists
+    3. Weight dtypes as fallback
+
+    Args:
+        filepath: Path to safetensors file
+
+    Returns:
+        Detected format string: "int8_tensorwise", "int8_blockwise",
+        "float8_e4m3fn", "float8_e4m3fn_blockwise", etc.
+        Returns "unknown" if format cannot be detected.
+    """
+    # Try global metadata first (fastest, header-only)
+    quant_meta = get_quantization_metadata(filepath)
+    if quant_meta:
+        algo = quant_meta.get("algorithm", "").lower()
+        # Map algorithm names to our format strings
+        if algo in ("int8_tensorwise", "int8_tw", "w8a8"):
+            return "int8_tensorwise"
+        elif algo in ("int8_blockwise", "int8_bw", "int8"):
+            return "int8_blockwise"
+        elif algo in ("fp8_e4m3", "float8_e4m3fn", "fp8"):
+            return "float8_e4m3fn"
+        elif algo in ("fp8_blockwise", "float8_e4m3fn_blockwise"):
+            return "float8_e4m3fn_blockwise"
+        elif algo in ("fp8_rowwise", "float8_e4m3fn_rowwise"):
+            return "float8_e4m3fn_rowwise"
+        elif algo in ("mxfp8",):
+            return "mxfp8"
+        elif algo in ("nvfp4",):
+            return "nvfp4"
+
+    # Try reading per-layer comfy_quant metadata
+    try:
+        with MemoryEfficientSafeOpen(filepath, device="cpu") as f:
+            keys = f.keys()
+
+            # Look for comfy_quant tensors
+            comfy_quant_keys = [k for k in keys if k.endswith("comfy_quant")]
+            if comfy_quant_keys:
+                try:
+                    layer_meta = f.get_tensor_as_dict(comfy_quant_keys[0])
+                    fmt = layer_meta.get("format", "")
+                    if "tensorwise" in fmt or "tw" in fmt:
+                        return "int8_tensorwise"
+                    elif "blockwise" in fmt or "bw" in fmt:
+                        if "int8" in fmt:
+                            return "int8_blockwise"
+                        elif "fp8" in fmt or "float8" in fmt:
+                            return "float8_e4m3fn_blockwise"
+                except (ValueError, json.JSONDecodeError):
+                    pass
+
+            # Fallback: check weight dtype and look for scale patterns
+            weight_keys = [k for k in keys if k.endswith(".weight")]
+            scale_keys = [k for k in keys if "weight_scale" in k or "scale_weight" in k]
+
+            if weight_keys:
+                # Get first weight metadata
+                first_weight_meta = f.header.get(weight_keys[0], {})
+                dtype = first_weight_meta.get("dtype", "")
+
+                if dtype == "I8":
+                    # Check if scale is scalar (tensorwise) or has shape (blockwise)
+                    if scale_keys:
+                        first_scale_key = scale_keys[0]
+                        scale_meta = f.header.get(first_scale_key, {})
+                        scale_shape = scale_meta.get("shape", [])
+
+                        # Scalar or 1-element = tensorwise, 2D = blockwise
+                        if not scale_shape or (len(scale_shape) == 1 and scale_shape[0] == 1):
+                            return "int8_tensorwise"
+                        else:
+                            return "int8_blockwise"
+                    return "int8_tensorwise"  # Default for int8
+
+                elif dtype in ("F8_E4M3", "F8_E5M2"):
+                    return "float8_e4m3fn"
+
+    except Exception:
+        pass
+
+    return "unknown"
+
