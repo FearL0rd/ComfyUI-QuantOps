@@ -134,13 +134,15 @@ class MemoryEfficientSafeOpen:
             raise ValueError(f"Unsupported float8 type: {dtype_str}")
 
 
-def load_fp8_state_dict(
+def load_quantized_state_dict(
     filepath: str,
     device: str = "cpu",
     force_scale_float32: bool = True,
-) -> Tuple[Dict[str, torch.Tensor], Optional[dict]]:
+) -> Tuple[Dict[str, torch.Tensor], str, Optional[dict]]:
     """
-    Load a safetensors file and return state_dict with float32 scales.
+    Load a safetensors file with format detection.
+
+    Combines format detection and loading into a single efficient pass.
 
     Args:
         filepath: Path to safetensors file
@@ -148,19 +150,87 @@ def load_fp8_state_dict(
         force_scale_float32: If True, convert all scale tensors to float32
 
     Returns:
-        Tuple of (state_dict, metadata)
+        Tuple of (state_dict, detected_format, metadata)
         - state_dict: Dict of tensors with scales guaranteed float32
+        - detected_format: Detected quantization format string
         - metadata: File metadata if present
     """
     state_dict = {}
     metadata = None
+    detected_format = "unknown"
 
     with MemoryEfficientSafeOpen(filepath, device=device) as f:
         # Get metadata if present
         if "__metadata__" in f.header:
             metadata = f.header["__metadata__"]
 
-        for key in f.keys():
+            # Try to detect format from global metadata
+            quant_meta_str = metadata.get("_quantization_metadata")
+            if quant_meta_str:
+                try:
+                    quant_meta = json.loads(quant_meta_str)
+                    algo = quant_meta.get("algorithm", "").lower()
+                    if algo in ("int8_tensorwise", "int8_tw", "w8a8"):
+                        detected_format = "int8_tensorwise"
+                    elif algo in ("int8_blockwise", "int8_bw", "int8"):
+                        detected_format = "int8_blockwise"
+                    elif algo in ("fp8_e4m3", "float8_e4m3fn", "fp8"):
+                        detected_format = "float8_e4m3fn"
+                    elif algo in ("fp8_blockwise", "float8_e4m3fn_blockwise"):
+                        detected_format = "float8_e4m3fn_blockwise"
+                    elif algo in ("fp8_rowwise", "float8_e4m3fn_rowwise"):
+                        detected_format = "float8_e4m3fn_rowwise"
+                    elif algo in ("mxfp8",):
+                        detected_format = "mxfp8"
+                    elif algo in ("nvfp4",):
+                        detected_format = "nvfp4"
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        keys = f.keys()
+
+        # If not detected from global metadata, try per-layer comfy_quant
+        if detected_format == "unknown":
+            comfy_quant_keys = [k for k in keys if k.endswith("comfy_quant")]
+            if comfy_quant_keys:
+                try:
+                    layer_meta = f.get_tensor_as_dict(comfy_quant_keys[0])
+                    fmt = layer_meta.get("format", "")
+                    if "tensorwise" in fmt or "tw" in fmt:
+                        detected_format = "int8_tensorwise"
+                    elif "blockwise" in fmt or "bw" in fmt:
+                        if "int8" in fmt:
+                            detected_format = "int8_blockwise"
+                        elif "fp8" in fmt or "float8" in fmt:
+                            detected_format = "float8_e4m3fn_blockwise"
+                except (ValueError, json.JSONDecodeError):
+                    pass
+
+        # Fallback: check weight dtype and scale shape
+        if detected_format == "unknown":
+            weight_keys = [k for k in keys if k.endswith(".weight")]
+            scale_keys = [k for k in keys if "weight_scale" in k or "scale_weight" in k]
+
+            if weight_keys:
+                first_weight_meta = f.header.get(weight_keys[0], {})
+                dtype = first_weight_meta.get("dtype", "")
+
+                if dtype == "I8":
+                    if scale_keys:
+                        scale_meta = f.header.get(scale_keys[0], {})
+                        scale_shape = scale_meta.get("shape", [])
+                        # Scalar or 1-element = tensorwise, 2D = blockwise
+                        if not scale_shape or (len(scale_shape) == 1 and scale_shape[0] == 1):
+                            detected_format = "int8_tensorwise"
+                        else:
+                            detected_format = "int8_blockwise"
+                    else:
+                        detected_format = "int8_tensorwise"
+                elif dtype in ("F8_E4M3", "F8_E5M2"):
+                    detected_format = "float8_e4m3fn"
+
+        # Load all tensors
+        for key in keys:
             tensor = f.get_tensor(key)
 
             # Check if this is a scale tensor that needs float32 conversion
@@ -170,7 +240,18 @@ def load_fp8_state_dict(
 
             state_dict[key] = tensor
 
-    return state_dict, metadata
+    return state_dict, detected_format, metadata
+
+
+# Legacy alias for backwards compatibility
+def load_fp8_state_dict(
+    filepath: str,
+    device: str = "cpu",
+    force_scale_float32: bool = True,
+) -> Tuple[Dict[str, torch.Tensor], Optional[dict]]:
+    """Legacy function - use load_quantized_state_dict instead."""
+    sd, _, metadata = load_quantized_state_dict(filepath, device, force_scale_float32)
+    return sd, metadata
 
 
 def _is_scale_tensor(key: str) -> bool:
