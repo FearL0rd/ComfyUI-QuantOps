@@ -56,6 +56,9 @@ class HybridFP8Ops(manual_cast):
             # Get weight_scale_2 (per-tensor scale for NVFP4)
             scale_2 = state_dict.pop(prefix + "weight_scale_2", None)
 
+            # Get weight_scalar (per-tensor scale for Hybrid MXFP8)
+            scalar = state_dict.pop(prefix + "weight_scalar", None)
+
             # Remove input_scale if present (not used for weight dequantization)
             state_dict.pop(prefix + "input_scale", None)
 
@@ -179,8 +182,7 @@ class HybridFP8Ops(manual_cast):
 
 
                     # Create layout_params based on layout_type
-                    if self.layout_type == "TensorCoreMXFP8Layout":
-                        from comfy_kitchen.tensor import TensorCoreMXFP8Layout
+                    if self.layout_type == "TensorCoreMXFP8Layout" or self.layout_type == "HybridMXFP8Layout":
                         # Get orig_dtype from comfy_quant metadata if available
                         orig_dtype_str = layer_conf.get("orig_dtype", "torch.bfloat16") if layer_conf else "torch.bfloat16"
                         DTYPE_MAP = {
@@ -196,14 +198,25 @@ class HybridFP8Ops(manual_cast):
                         # Convert E8M0 scales from uint8 to float8_e8m0fnu (safetensors stores as uint8)
                         if scale is not None and scale.dtype == torch.uint8:
                             scale = scale.view(torch.float8_e8m0fnu)
+
+                        if self.layout_type == "HybridMXFP8Layout":
+                            from comfy_kitchen.tensor import HybridMXFP8Layout
+                            layout_params = HybridMXFP8Layout.Params(
+                                scale=scale,
+                                orig_dtype=orig_dtype,
+                                orig_shape=orig_shape,
+                                scalar=scalar,
+                            )
+                        else:
+                            from comfy_kitchen.tensor import TensorCoreMXFP8Layout
+                            layout_params = TensorCoreMXFP8Layout.Params(
+                                scale=scale,
+                                orig_dtype=orig_dtype,
+                                orig_shape=orig_shape,
+                            )
                         
-                        layout_params = TensorCoreMXFP8Layout.Params(
-                            scale=scale,
-                            orig_dtype=orig_dtype,
-                            orig_shape=orig_shape,
-                        )
                         logging.debug(
-                            f"HybridFP8Ops: Loading MXFP8 layer {prefix}, scale shape={scale.shape if scale is not None else None}"
+                            f"HybridFP8Ops: Loading {self.layout_type} layer {prefix}, scale shape={scale.shape if scale is not None else None}"
                         )
                     elif self.layout_type == "BlockWiseFP8Layout":
                         from .quant_layouts.fp8_variants import BlockWiseFP8Layout

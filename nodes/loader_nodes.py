@@ -37,7 +37,7 @@ class QuantizedModelLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
             "optional": {
@@ -96,8 +96,8 @@ class QuantizedModelLoader:
             logging.info(
                 "QuantizedModelLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-            # Block-wise, row-wise, MXFP8, or NVFP4 - use HybridFP8Ops
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
@@ -170,7 +170,7 @@ class QuantizedUNETLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -214,8 +214,8 @@ class QuantizedUNETLoader:
             logging.info(
                 "QuantizedUNETLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-            # Block-wise, row-wise, MXFP8, or NVFP4 - use HybridFP8Ops
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
@@ -292,7 +292,7 @@ class QuantizedCLIPLoader:
             "required": {
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (cls.CLIP_TYPES,),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -350,8 +350,8 @@ class QuantizedCLIPLoader:
             logging.info(
                 "QuantizedCLIPLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-            # Block-wise, row-wise, MXFP8, or NVFP4 - use HybridFP8Ops
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
