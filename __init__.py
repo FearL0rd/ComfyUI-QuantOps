@@ -252,6 +252,24 @@ def _register_layouts():
             },
         )
 
+        # Hybrid MXFP8 from comfy_kitchen
+        try:
+            from comfy_kitchen.tensor import HybridMXFP8Layout
+            register_layout_class("HybridMXFP8Layout", HybridMXFP8Layout)
+            logging.info("ComfyUI-QuantOps: Registered HybridMXFP8Layout")
+        except ImportError:
+            logging.debug("ComfyUI-QuantOps: HybridMXFP8Layout not available")
+
+        QUANT_ALGOS.setdefault(
+            "hybrid_mxfp8",
+            {
+                "storage_t": torch.float8_e4m3fn,
+                "parameters": {"weight_scale", "weight_scalar"},
+                "comfy_tensor_layout": "HybridMXFP8Layout",
+                "group_size": 32,
+            },
+        )
+
         # NVFP4: Don't register layout (ComfyUI core does this), just add QUANT_ALGOS entry if missing
         QUANT_ALGOS.setdefault(
             "nvfp4",
