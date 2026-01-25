@@ -37,7 +37,7 @@ class QuantizedModelLoader:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
             "optional": {
@@ -96,8 +96,8 @@ class QuantizedModelLoader:
             logging.info(
                 "QuantizedModelLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"):
-            # Block-wise or row-wise FP8 - use HybridFP8Ops for per-block/row scales
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
@@ -170,7 +170,7 @@ class QuantizedUNETLoader:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"],),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -214,8 +214,8 @@ class QuantizedUNETLoader:
             logging.info(
                 "QuantizedUNETLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise"):
-            # Block-wise or row-wise FP8 - use HybridFP8Ops
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
             try:
                 from ..fp8_ops import HybridFP8Ops
 
@@ -252,9 +252,14 @@ class QuantizedUNETLoader:
 
 class QuantizedCLIPLoader:
     """
-    Load CLIP/text encoders with INT8 blockwise quantization.
+    Load CLIP/text encoders with custom quantization layouts.
 
-    Supports text encoders quantized by convert_to_quant with --int8 --comfy_quant.
+    Supports text encoders quantized by convert_to_quant with various formats.
+
+    FP8 Modes:
+    - float8_e4m3fn: Standard tensor-scaled FP8 (uses ComfyUI built-in handling)
+    - float8_e4m3fn_blockwise: Block-wise scaled FP8 (uses HybridFP8Ops)
+    - float8_e4m3fn_rowwise: Row-wise scaled FP8 (uses HybridFP8Ops)
     """
 
     # CLIPType options matching built-in CLIPLoader from nodes.py
@@ -287,6 +292,7 @@ class QuantizedCLIPLoader:
             "required": {
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (cls.CLIP_TYPES,),
+                "quant_format": (["auto", "int8", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
             },
         }
@@ -294,23 +300,24 @@ class QuantizedCLIPLoader:
     RETURN_TYPES = ("CLIP",)
     FUNCTION = "load_clip"
     CATEGORY = "loaders/quantized"
-    DESCRIPTION = "Load INT8-quantized text encoders (CLIP, T5, etc.)"
+    DESCRIPTION = "Load quantized text encoders (CLIP, T5, etc.). float8_e4m3fn (tensor-scaled) uses ComfyUI built-in. INT8/FP8 blockwise/rowwise use custom layouts."
 
-    def load_clip(self, clip_name, type, kernel_backend):
-        """Load a CLIP/text encoder with INT8 quantization support."""
+    def load_clip(self, clip_name, type, quant_format, kernel_backend):
+        """Load a CLIP/text encoder with quantization support."""
         import comfy.model_management
 
-        # Configure INT8 kernel backend
-        try:
-            from ..quant_layouts.int8_layout import BlockWiseINT8Layout
+        # Configure INT8 kernel backend (only affects INT8 models)
+        if quant_format in ("auto", "int8"):
+            try:
+                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
 
-            BlockWiseINT8Layout.set_backend(kernel_backend)
-            logging.debug(
-                f"QuantizedCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
-            )
-        except Exception as e:
-            if kernel_backend == "triton":
-                logging.warning(f"Failed to configure Triton backend: {e}")
+                BlockWiseINT8Layout.set_backend(kernel_backend)
+                logging.debug(
+                    f"QuantizedCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
+                )
+            except Exception as e:
+                if kernel_backend == "triton":
+                    logging.warning(f"Failed to configure Triton backend: {e}")
 
         # Get clip path
         clip_path = folder_paths.get_full_path("text_encoders", clip_name)
@@ -323,19 +330,46 @@ class QuantizedCLIPLoader:
         # Load state dict
         sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
 
-        # Set up model options with our custom INT8 ops
+        # Set up model options based on quant_format
         model_options = {
             "initial_device": comfy.model_management.text_encoder_offload_device()
         }
-        try:
-            from ..int8_ops import HybridINT8Ops
 
-            model_options["custom_operations"] = HybridINT8Ops
+        if quant_format == "int8":
+            try:
+                from ..int8_ops import HybridINT8Ops
+
+                model_options["custom_operations"] = HybridINT8Ops
+                logging.info(
+                    "QuantizedCLIPLoader: Using HybridINT8Ops for INT8 text encoder"
+                )
+            except ImportError as e:
+                logging.warning(f"HybridINT8Ops not available: {e}")
+        elif quant_format == "float8_e4m3fn":
+            # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
             logging.info(
-                "QuantizedCLIPLoader: Using HybridINT8Ops for INT8 text encoder"
+                "QuantizedCLIPLoader: Using ComfyUI built-in for tensor-scaled FP8"
             )
-        except ImportError as e:
-            logging.warning(f"HybridINT8Ops not available: {e}")
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
+            try:
+                from ..fp8_ops import HybridFP8Ops
+
+                model_options["custom_operations"] = HybridFP8Ops
+                logging.info(
+                    f"QuantizedCLIPLoader: Using HybridFP8Ops for {quant_format} text encoder"
+                )
+            except ImportError as e:
+                logging.warning(f"HybridFP8Ops not available: {e}")
+        else:  # auto
+            # Try INT8 as fallback for auto mode
+            try:
+                from ..int8_ops import HybridINT8Ops
+
+                model_options["custom_operations"] = HybridINT8Ops
+                logging.info("QuantizedCLIPLoader: Auto-selected HybridINT8Ops")
+            except ImportError as e:
+                logging.warning(f"No quantized ops available: {e}")
 
         # Load text encoder using ComfyUI's API
         clip = comfy.sd.load_text_encoder_state_dicts(
