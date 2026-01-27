@@ -3,6 +3,7 @@ ComfyUI-QuantOps: Extended Quantization Layouts for ComfyUI
 
 This custom node extends ComfyUI's quantization system with additional layouts:
 - INT8 blockwise (with optional Triton acceleration)
+- INT8 tensorwise (uses torch._int_mm with dynamic activation quant)
 - Row-wise and Block-wise FP8 variants
 
 All layouts are lazy-loaded to avoid import errors when optional dependencies
@@ -86,9 +87,10 @@ def _register_quantops_backend():
             DivisibleBy,
         )
         
-        # Import our kernel module
+        # Import our kernel modules
         from .kernels import int8_kernels
         from .kernels import fp8_kernels
+        from .kernels import tensorwise_kernels
         
         cuda_devices = frozenset({"cuda"})
         standard_floats = frozenset({torch.float32, torch.float16, torch.bfloat16})
@@ -178,6 +180,32 @@ def _register_quantops_backend():
             logging.info("ComfyUI-QuantOps: Registered quantops_fp8 backend")
         except Exception as e:
             logging.debug(f"ComfyUI-QuantOps: Could not register FP8 backend: {e}")
+        
+        # Register Tensorwise INT8 backend (uses torch._int_mm or Triton mm_8bit)
+        try:
+            tensorwise_constraints = {
+                "mm_8bit": FunctionConstraints(
+                    params={
+                        "a": ParamConstraint(
+                            dtypes=frozenset({torch.int8}),
+                            shape_rules=(ExactDims(2),),
+                        ),
+                        "b": ParamConstraint(
+                            dtypes=frozenset({torch.int8}),
+                            shape_rules=(ExactDims(2),),
+                        ),
+                    },
+                    default_devices=cuda_devices,
+                ),
+            }
+            registry.register(
+                name="quantops_int8_tensorwise",
+                module=tensorwise_kernels,
+                capabilities=tensorwise_constraints,
+            )
+            logging.info("ComfyUI-QuantOps: Registered quantops_int8_tensorwise backend")
+        except Exception as e:
+            logging.debug(f"ComfyUI-QuantOps: Could not register tensorwise INT8 backend: {e}")
             
     except ImportError as e:
         logging.debug(f"ComfyUI-QuantOps: Could not register backends (missing deps): {e}")
@@ -199,13 +227,24 @@ def _register_layouts():
         # Import our layouts (this also registers their operation handlers)
         from .quant_layouts.int8_layout import BlockWiseINT8Layout
         from .quant_layouts.fp8_variants import RowWiseFP8Layout, BlockWiseFP8Layout
+        from .quant_layouts.tensorwise_int8_layout import TensorWiseInt8Layout
 
         # Register layouts using the new comfy_kitchen API
         register_layout_class("BlockWiseINT8Layout", BlockWiseINT8Layout)
         register_layout_class("RowWiseFP8Layout", RowWiseFP8Layout)
         register_layout_class("BlockWiseFP8Layout", BlockWiseFP8Layout)
+        register_layout_class("TensorWiseInt8Layout", TensorWiseInt8Layout)
+        register_layout_class("TensorWiseINT8Layout", TensorWiseInt8Layout)
 
         # Register QUANT_ALGOS
+        QUANT_ALGOS.setdefault(
+            "int8_tensorwise",
+            {
+                "storage_t": torch.int8,
+                "parameters": {"weight_scale"},
+                "comfy_tensor_layout": "TensorWiseInt8Layout",
+            },
+        )
         QUANT_ALGOS.setdefault(
             "int8_blockwise",
             {
@@ -282,7 +321,7 @@ def _register_layouts():
         )
 
         # Verify registration
-        registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
+        registered = ["BlockWiseINT8Layout", "TensorWiseInt8Layout", "TensorWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
         logging.info(f"ComfyUI-QuantOps: Registered layouts: {registered}")
 
     except Exception as e:
