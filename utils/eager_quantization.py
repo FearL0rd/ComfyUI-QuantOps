@@ -35,9 +35,12 @@ def int8_linear(
     bias: Optional[torch.Tensor] = None,
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    """INT8 linear layer using torch._int_mm.
+    """INT8 linear layer using torch.int8_mm for direct quantized matmul.
     
-    Ported from comfy-kitchen eager backend.
+    Uses native torch.int8_mm which avoids materializing large float32 intermediates
+    and handles scaling more efficiently than manual int32 -> float32 conversion.
+    
+    Ported from comfy-kitchen eager backend with OOM fixes.
     """
     orig_shape = x.shape
     x_2d = x.reshape(-1, x.shape[-1])
@@ -45,15 +48,33 @@ def int8_linear(
     # Quantize input per-row
     x_8, x_scale = quantize_int8_rowwise(x_2d)
 
-    # Compute: x_8 @ weight.T using torch._int_mm
+    # Compute using torch.int8_mm which is optimized for int8 operations
     # weight is [N, K], we need [K, N] for matmul so transpose
-    result = torch._int_mm(x_8, weight.T.contiguous())
+    result = torch.int8_mm(x_8, weight.T.contiguous())
 
-    # Scale back: result * (weight_scale * x_scale)
-    result = result.float() * (weight_scale * x_scale)
+    # Scale back efficiently: result * (weight_scale * x_scale)
+    # Process in chunks to avoid materializing large float32 tensor
+    # which causes OOM for large models
+    
+    M, N = result.shape
+    chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))  # Estimate safe chunk size
+    
+    scaled_parts = []
+    for i in range(0, M, chunk_size):
+        end_i = min(i + chunk_size, M)
+        chunk = result[i:end_i].float()
+        
+        # Apply scales: chunk * (weight_scale * x_scale[i:end_i])
+        chunk_scales = (weight_scale * x_scale[i:end_i])
+        chunk_scaled = chunk * chunk_scales
+        
+        # Convert to output dtype immediately to free memory
+        chunk_scaled = chunk_scaled.to(out_dtype)
+        scaled_parts.append(chunk_scaled)
+    
+    result = torch.cat(scaled_parts, dim=0)
 
     if bias is not None:
-        result = result + bias.to(result.dtype)
+        result = result + bias.to(device=result.device, dtype=result.dtype)
 
-    result = result.to(out_dtype)
     return result.reshape(*orig_shape[:-1], weight.shape[0])

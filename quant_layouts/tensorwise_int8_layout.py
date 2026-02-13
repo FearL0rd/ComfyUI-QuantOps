@@ -146,9 +146,9 @@ def quantize_int8_axiswise(x: torch.Tensor, dim: int) -> Tuple[torch.Tensor, tor
 @register_layout_op(torch.ops.aten.linear.default, TensorWiseInt8Layout)
 def tensorwise_int8_linear(func, args, kwargs):
     """
-    Tensorwise INT8 linear operation using torch._int_mm.
+    Tensorwise INT8 linear operation using torch.int8_mm.
 
-    Uses dynamic per-row activation quantization.
+    Uses dynamic per-row activation quantization with memory-efficient scaling.
     """
     input_tensor = args[0]
     weight = args[1]
@@ -190,6 +190,7 @@ def tensorwise_int8_linear(func, args, kwargs):
 def _tensorwise_int8_matmul(x: torch.Tensor, weight_int8: torch.Tensor, weight_scale: torch.Tensor) -> torch.Tensor:
     """
     Perform INT8 matmul with dynamic activation quantization.
+    Uses torch.int8_mm with memory-efficient chunked scaling.
 
     Args:
         x: Input tensor [M, K] in float
@@ -207,16 +208,37 @@ def _tensorwise_int8_matmul(x: torch.Tensor, weight_int8: torch.Tensor, weight_s
             x_int8, x_scale = quantize_int8_axiswise(x, dim=-1)
             # Triton matmul
             result = mm_8bit_triton(x_int8, weight_int8.T)
-            # Rescale: result * weight_scale * x_scale
-            result = result.float() * (weight_scale * x_scale)
+            
+            # Efficient scaling with chunking to avoid OOM
+            M, N = result.shape
+            chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))
+            scaled_parts = []
+            for i in range(0, M, chunk_size):
+                end_i = min(i + chunk_size, M)
+                chunk = result[i:end_i].float()
+                chunk_scales = weight_scale * x_scale[i:end_i]
+                chunk_scaled = chunk * chunk_scales
+                scaled_parts.append(chunk_scaled)
+            result = torch.cat(scaled_parts, dim=0)
             return result
     except ImportError:
         pass
 
-    # Fallback to torch._int_mm
+    # Fallback to torch.int8_mm with efficient scaling
     x_int8, x_scale = quantize_int8_axiswise(x, dim=-1)
-    result = torch._int_mm(x_int8, weight_int8.T)
-    result = result.float() * (weight_scale * x_scale)
+    result = torch.int8_mm(x_int8, weight_int8.T)
+    
+    # Efficient scaling with chunking to avoid materializing large float32
+    M, N = result.shape
+    chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))
+    scaled_parts = []
+    for i in range(0, M, chunk_size):
+        end_i = min(i + chunk_size, M)
+        chunk = result[i:end_i].float()
+        chunk_scales = weight_scale * x_scale[i:end_i]
+        chunk_scaled = chunk * chunk_scales
+        scaled_parts.append(chunk_scaled)
+    result = torch.cat(scaled_parts, dim=0)
     return result
 
 

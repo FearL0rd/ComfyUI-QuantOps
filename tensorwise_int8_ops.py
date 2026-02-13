@@ -365,6 +365,7 @@ def _int8_forward_dynamic(
 ) -> Tensor:
     """
     Forward with dynamic per-row activation quantization.
+    Memory-efficient implementation that avoids materializing large float32 tensors.
     Ported from comfy-kitchen eager backend.
     """
     # Try Triton kernel first (QuantOps specific optimization)
@@ -373,14 +374,29 @@ def _int8_forward_dynamic(
             from .kernels.tensorwise_kernels import mm_8bit
             x_8, x_scale = quantize_int8_axiswise(x, dim=-1)
             res = mm_8bit(x_8, weight.T)
-            res_scaled = res.float().mul_(weight_scale * x_scale).to(compute_dtype)
+            
+            # Efficient scaling without materializing large float32 tensor
+            M, N = res.shape
+            chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))  # Safe chunk estimate
+            
+            scaled_parts = []
+            for i in range(0, M, chunk_size):
+                end_i = min(i + chunk_size, M)
+                chunk = res[i:end_i].float()
+                chunk_scales = weight_scale * x_scale[i:end_i]
+                chunk_scaled = chunk * chunk_scales
+                chunk_scaled = chunk_scaled.to(compute_dtype)
+                scaled_parts.append(chunk_scaled)
+            
+            res_scaled = torch.cat(scaled_parts, dim=0)
+            
             if bias is not None:
                 res_scaled = res_scaled + bias.to(device=res_scaled.device, dtype=compute_dtype)
             return res_scaled
         except (ImportError, RuntimeError, AttributeError):
             pass
 
-    # Fallback to eager implementation (matches comfy-kitchen)
+    # Fallback to efficient eager implementation
     try:
         from comfy_kitchen.backends.eager.quantization import int8_linear
     except ImportError:
@@ -401,6 +417,7 @@ def _int8_forward_static(
 ) -> Tensor:
     """
     Forward with static (calibrated) activation quantization.
+    Memory-efficient implementation that processes results in chunks.
     """
     # Try Triton kernel first
     if x.is_cuda:
@@ -408,17 +425,47 @@ def _int8_forward_static(
             from .kernels.tensorwise_kernels import mm_8bit
             x_8 = quantize_int8(x, input_scale)
             res = mm_8bit(x_8, weight.T)
-            res_scaled = res.float().mul_(weight_scale * input_scale).to(compute_dtype)
+            
+            # Efficient scaling with chunking to avoid large float32 tensors
+            M, N = res.shape
+            chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))
+            
+            scaled_parts = []
+            for i in range(0, M, chunk_size):
+                end_i = min(i + chunk_size, M)
+                chunk = res[i:end_i].float()
+                chunk_scales = weight_scale * input_scale
+                chunk_scaled = chunk * chunk_scales
+                chunk_scaled = chunk_scaled.to(compute_dtype)
+                scaled_parts.append(chunk_scaled)
+            
+            res_scaled = torch.cat(scaled_parts, dim=0)
+            
             if bias is not None:
                 res_scaled = res_scaled + bias.to(device=res_scaled.device, dtype=compute_dtype)
             return res_scaled
         except (ImportError, RuntimeError, AttributeError):
             pass
 
-    # Fallback to torch._int_mm (static path not in ck.int8_linear)
+    # Fallback to torch.int8_mm with efficient scaling
     x_8 = quantize_int8(x, input_scale)
-    res = torch._int_mm(x_8, weight.T)
-    res_scaled = res.float().mul_(weight_scale * input_scale).to(compute_dtype)
+    res = torch.int8_mm(x_8, weight.T)
+    
+    # Efficient scaling with chunking
+    M, N = res.shape
+    chunk_size = max(1, min(M, 256 * 1024 * 1024 // (N * 4)))
+    
+    scaled_parts = []
+    for i in range(0, M, chunk_size):
+        end_i = min(i + chunk_size, M)
+        chunk = res[i:end_i].float()
+        chunk_scales = weight_scale * input_scale
+        chunk_scaled = chunk * chunk_scales
+        chunk_scaled = chunk_scaled.to(compute_dtype)
+        scaled_parts.append(chunk_scaled)
+    
+    res_scaled = torch.cat(scaled_parts, dim=0)
+    
     if bias is not None:
         res_scaled = res_scaled + bias.to(device=res_scaled.device, dtype=compute_dtype)
     return res_scaled

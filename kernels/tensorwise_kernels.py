@@ -128,7 +128,7 @@ def mm_8bit(a: Tensor, b: Tensor) -> Tensor:
     """
     8-bit matmul with automatic backend selection.
 
-    Tries Triton first, falls back to torch._int_mm for int8.
+    Tries Triton first, falls back to torch.int8_mm for int8.
 
     Args:
         a: INT8 or FP8 tensor [M, K]
@@ -143,9 +143,9 @@ def mm_8bit(a: Tensor, b: Tensor) -> Tensor:
         if result is not None:
             return result
 
-    # Fallback to torch._int_mm for int8
+    # Fallback to torch.int8_mm for int8
     if a.dtype == torch.int8:
-        return torch._int_mm(a, b)
+        return torch.int8_mm(a, b)
     else:
         # FP8 fallback using scaled_mm with unit scales
         one = torch.ones(1, device=a.device)
