@@ -1,12 +1,24 @@
 # Installation instructions MXFP8 Support (Blackwell) Windows Wheel
 
 
-## torch 2.10 cuda 13
+## Install or update Pytorch to 2.10 for CUDA 13
 
 - required for scaled_mm_v2
 
+### Regular venv installation:
+
 ```bash
+.\venv\Scripts\Activate.ps1
 pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 -U
+```
+
+### ComfyUI portable installation:
+
+- Right click the same folder you have `run_cpu.bat` and the `run_nvidia_gpu.bat` files in Windows Explorer and select `Open in Terminal`
+- Paste the following command and press Enter
+
+```bash
+.\python_embeded\python.exe -s -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130 -U
 ```
 
 ## Install custom comfy-kitchen wheel into your ComfyUI installation
