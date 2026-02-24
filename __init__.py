@@ -3,6 +3,7 @@ ComfyUI-QuantOps: Extended Quantization Layouts for ComfyUI
 
 This custom node extends ComfyUI's quantization system with additional layouts:
 - INT8 blockwise (with optional Triton acceleration)
+- INT8 tensorwise (uses torch._int_mm with dynamic activation quant)
 - Row-wise and Block-wise FP8 variants
 
 All layouts are lazy-loaded to avoid import errors when optional dependencies
@@ -86,7 +87,7 @@ def _register_quantops_backend():
             DivisibleBy,
         )
         
-        # Import our kernel module
+        # Import our kernel modules
         from .kernels import int8_kernels
         from .kernels import fp8_kernels
         
@@ -205,7 +206,23 @@ def _register_layouts():
         register_layout_class("RowWiseFP8Layout", RowWiseFP8Layout)
         register_layout_class("BlockWiseFP8Layout", BlockWiseFP8Layout)
 
+        # Tensorwise INT8 from comfy_kitchen
+        try:
+            from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
+            register_layout_class("TensorWiseINT8Layout", TensorWiseINT8Layout)
+            logging.info("ComfyUI-QuantOps: Registered TensorWiseINT8Layout")
+        except ImportError:
+            logging.debug("ComfyUI-QuantOps: TensorWiseINT8Layout not available")
+
         # Register QUANT_ALGOS
+        QUANT_ALGOS.setdefault(
+            "int8_tensorwise",
+            {
+                "storage_t": torch.int8,
+                "parameters": {"weight_scale", "input_scale"}, # Keep input_scale if checkpoints have it
+                "comfy_tensor_layout": "TensorWiseINT8Layout", # Must match the class name above
+            }
+        )
         QUANT_ALGOS.setdefault(
             "int8_blockwise",
             {
@@ -282,7 +299,7 @@ def _register_layouts():
         )
 
         # Verify registration
-        registered = ["BlockWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
+        registered = ["BlockWiseINT8Layout", "TensorWiseINT8Layout", "RowWiseFP8Layout", "BlockWiseFP8Layout", "TensorCoreMXFP8Layout"]
         logging.info(f"ComfyUI-QuantOps: Registered layouts: {registered}")
 
     except Exception as e:

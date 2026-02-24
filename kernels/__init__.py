@@ -14,10 +14,23 @@ try:
 except ImportError:
     _HAS_FP8_KERNELS = False
 
+# Tensorwise INT8 kernels (Triton optional, falls back to torch._int_mm)
+try:
+    from .tensorwise_kernels import (
+        mm_8bit,
+        mm_8bit_triton,
+        _check_triton_available as tensorwise_check_triton,
+    )
+    _HAS_TENSORWISE_KERNELS = True
+except ImportError:
+    _HAS_TENSORWISE_KERNELS = False
+
 __all__ = [
     "_HAS_FP8_KERNELS",
+    "_HAS_TENSORWISE_KERNELS",
     "fp8_act_quant",
     "fp8_gemm_blockwise",
     "fp8_addmm_blockwise",
     "fp8_gemm_rowwise",
+    "mm_8bit",
 ]
