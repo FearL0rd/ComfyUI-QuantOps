@@ -80,23 +80,13 @@ class QuantizedModelLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format == "int8_tensorwise":
-            try:
-                from ..tensorwise_int8_ops import TensorWiseInt8Ops
-
-                model_options = {"custom_operations": TensorWiseInt8Ops}
-                logging.info(
-                    "QuantizedModelLoader: Using TensorWiseInt8Ops (torch._int_mm)"
-                )
-            except ImportError as e:
-                logging.warning(f"TensorWiseInt8Ops not available: {e}")
-        elif quant_format == "int8":
+        if quant_format in ("int8_tensorwise", "int8"):
             try:
                 from ..int8_ops import HybridINT8Ops
 
                 model_options = {"custom_operations": HybridINT8Ops}
                 logging.info(
-                    "QuantizedModelLoader: Using HybridINT8Ops for INT8 models"
+                    f"QuantizedModelLoader: Using HybridINT8Ops for {quant_format} models"
                 )
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
@@ -127,10 +117,7 @@ class QuantizedModelLoader:
                 logging.info(f"QuantizedModelLoader: Auto-detected format: {detected_format}")
 
                 # Select ops based on detected format
-                if detected_format == "int8_tensorwise":
-                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
-                    model_options = {"custom_operations": TensorWiseInt8Ops}
-                elif detected_format == "int8_blockwise":
+                if detected_format in ("int8_tensorwise", "int8_blockwise"):
                     from ..int8_ops import HybridINT8Ops
                     model_options = {"custom_operations": HybridINT8Ops}
                 elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
@@ -221,20 +208,12 @@ class QuantizedUNETLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format == "int8_tensorwise":
-            try:
-                from ..tensorwise_int8_ops import TensorWiseInt8Ops
-
-                model_options = {"custom_operations": TensorWiseInt8Ops}
-                logging.info("QuantizedUNETLoader: Using TensorWiseInt8Ops (torch._int_mm)")
-            except ImportError as e:
-                logging.warning(f"TensorWiseInt8Ops not available: {e}")
-        elif quant_format == "int8":
+        if quant_format in ("int8_tensorwise", "int8"):
             try:
                 from ..int8_ops import HybridINT8Ops
 
                 model_options = {"custom_operations": HybridINT8Ops}
-                logging.info("QuantizedUNETLoader: Using HybridINT8Ops for INT8 models")
+                logging.info(f"QuantizedUNETLoader: Using HybridINT8Ops for {quant_format} models")
             except ImportError as e:
                 logging.warning(f"HybridINT8Ops not available: {e}")
         elif quant_format == "float8_e4m3fn":
@@ -263,10 +242,7 @@ class QuantizedUNETLoader:
                 logging.info(f"QuantizedUNETLoader: Auto-detected format: {detected_format}")
 
                 # Select ops based on detected format
-                if detected_format == "int8_tensorwise":
-                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
-                    model_options = {"custom_operations": TensorWiseInt8Ops}
-                elif detected_format == "int8_blockwise":
+                if detected_format in ("int8_tensorwise", "int8_blockwise"):
                     from ..int8_ops import HybridINT8Ops
                     model_options = {"custom_operations": HybridINT8Ops}
                 elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
@@ -376,8 +352,7 @@ class QuantizedCLIPLoader:
 
                 # Select ops based on detected format
                 if detected_format == "int8_tensorwise":
-                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
-                    model_options["custom_operations"] = TensorWiseInt8Ops
+                    pass # Handled natively by ComfyUI
                 elif detected_format == "int8_blockwise":
                     from ..int8_ops import HybridINT8Ops
                     model_options["custom_operations"] = HybridINT8Ops
@@ -393,18 +368,11 @@ class QuantizedCLIPLoader:
             # Explicit format: set ops and load
             sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
 
-            if quant_format == "int8_tensorwise":
-                try:
-                    from ..tensorwise_int8_ops import TensorWiseInt8Ops
-                    model_options["custom_operations"] = TensorWiseInt8Ops
-                    logging.info("QuantizedCLIPLoader: Using TensorWiseInt8Ops")
-                except ImportError as e:
-                    logging.warning(f"TensorWiseInt8Ops not available: {e}")
-            elif quant_format == "int8":
+            if quant_format in ("int8_tensorwise", "int8"):
                 try:
                     from ..int8_ops import HybridINT8Ops
                     model_options["custom_operations"] = HybridINT8Ops
-                    logging.info("QuantizedCLIPLoader: Using HybridINT8Ops for INT8 text encoder")
+                    logging.info(f"QuantizedCLIPLoader: Using HybridINT8Ops for {quant_format} text encoder")
                 except ImportError as e:
                     logging.warning(f"HybridINT8Ops not available: {e}")
             elif quant_format == "float8_e4m3fn":

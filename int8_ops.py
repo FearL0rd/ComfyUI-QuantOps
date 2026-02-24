@@ -13,13 +13,20 @@ from comfy.ops import manual_cast, cast_bias_weight, uncast_bias_weight
 from comfy.quant_ops import QuantizedTensor
 from comfy.model_patcher import LowVramPatch
 
-# Try to import our INT8 layout
+# Try to import our INT8 layouts
 try:
     from .quant_layouts.int8_layout import BlockWiseINT8Layout, _check_triton_available
     _HAS_INT8_LAYOUT = True
 except ImportError:
     _HAS_INT8_LAYOUT = False
-    logging.warning("INT8 layout not available")
+    logging.warning("INT8 blockwise layout not available")
+
+try:
+    from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
+    _HAS_TENSORWISE_INT8_LAYOUT = True
+except ImportError:
+    _HAS_TENSORWISE_INT8_LAYOUT = False
+    logging.warning("INT8 tensorwise layout not available from comfy_kitchen")
 
 
 class HybridINT8Ops(manual_cast):
@@ -87,25 +94,39 @@ class HybridINT8Ops(manual_cast):
                     self.is_quantized = True
                     self.scale_weight = scale
                     
-                    if scale is not None and _HAS_INT8_LAYOUT:
-                        # Create QuantizedTensor with BlockWiseINT8Layout
-                        from .quant_layouts.int8_layout import BlockWiseINT8Layout
-                        layout_params = BlockWiseINT8Layout.Params(
-                            scale=scale.to(torch.float32),
-                            orig_dtype=torch.bfloat16,  # Will be updated in forward
-                            orig_shape=tuple(weight_tensor.shape),
-                            block_size=self.block_size,
-                            is_weight=True,
-                        )
-                        self.weight = torch.nn.Parameter(
-                            QuantizedTensor(weight_tensor, "BlockWiseINT8Layout", layout_params),
-                            requires_grad=False
-                        )
-                        logging.debug(f"Loaded INT8 layer {weight_key} with scale shape {scale.shape}")
-                    else:
-                        # Store raw INT8 tensor and scale for fallback dequantization
-                        self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
-                        logging.debug(f"Loaded INT8 layer {weight_key} without layout (scale={scale is not None})")
+                    if scale is not None:
+                        is_tensorwise = self.quant_format == 'int8_tensorwise' or (self.quant_format is None and (scale.ndim == 0 or (scale.ndim == 1 and scale.shape[0] == 1)))
+                        
+                        if is_tensorwise and _HAS_TENSORWISE_INT8_LAYOUT:
+                            layout_params = TensorWiseINT8Layout.Params(
+                                scale=scale.to(torch.float32),
+                                orig_dtype=torch.bfloat16,
+                                orig_shape=tuple(weight_tensor.shape),
+                                is_weight=True,
+                            )
+                            self.weight = torch.nn.Parameter(
+                                QuantizedTensor(weight_tensor, "TensorWiseINT8Layout", layout_params),
+                                requires_grad=False
+                            )
+                            logging.debug(f"Loaded INT8 layer {weight_key} with TensorWiseINT8Layout")
+                        elif not is_tensorwise and _HAS_INT8_LAYOUT:
+                            # Create QuantizedTensor with BlockWiseINT8Layout
+                            layout_params = BlockWiseINT8Layout.Params(
+                                scale=scale.to(torch.float32),
+                                orig_dtype=torch.bfloat16,  # Will be updated in forward
+                                orig_shape=tuple(weight_tensor.shape),
+                                block_size=self.block_size,
+                                is_weight=True,
+                            )
+                            self.weight = torch.nn.Parameter(
+                                QuantizedTensor(weight_tensor, "BlockWiseINT8Layout", layout_params),
+                                requires_grad=False
+                            )
+                            logging.debug(f"Loaded INT8 layer {weight_key} with BlockWiseINT8Layout")
+                        else:
+                            # Store raw INT8 tensor and scale for fallback dequantization
+                            self.weight = torch.nn.Parameter(weight_tensor, requires_grad=False)
+                            logging.debug(f"Loaded INT8 layer {weight_key} without layout (scale={scale is not None})")
                 else:
                     # Non-INT8 weight - this is a high-precision layer
                     self.is_quantized = False
