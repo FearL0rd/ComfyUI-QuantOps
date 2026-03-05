@@ -179,6 +179,7 @@ class QuantizedUNETLoader:
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -187,7 +188,7 @@ class QuantizedUNETLoader:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Load diffusion models with custom quantization support. int8_tensorwise uses torch._int_mm for fast inference."
 
-    def load_unet(self, unet_name, quant_format, kernel_backend):
+    def load_unet(self, unet_name, quant_format, kernel_backend, disable_dynamic):
         """Load a UNET model with the specified settings."""
 
         # Set kernel backend (only for INT8 blockwise format)
@@ -255,7 +256,7 @@ class QuantizedUNETLoader:
         sd = comfy.utils.load_torch_file(unet_path, safe_load=True)
 
         # Build model from state dict
-        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options)
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, disable_dynamic=disable_dynamic)
 
         return (model,)
 
@@ -304,6 +305,7 @@ class QuantizedCLIPLoader:
                 "type": (cls.CLIP_TYPES,),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -312,7 +314,7 @@ class QuantizedCLIPLoader:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Load quantized text encoders (CLIP, T5, etc.). int8_tensorwise uses torch._int_mm for fast inference."
 
-    def load_clip(self, clip_name, type, quant_format, kernel_backend):
+    def load_clip(self, clip_name, type, quant_format, kernel_backend, disable_dynamic):
         """Load a CLIP/text encoder with quantization support."""
         import comfy.model_management
 
@@ -392,6 +394,7 @@ class QuantizedCLIPLoader:
             clip_type=clip_type,
             model_options=model_options,
             embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            disable_dynamic=disable_dynamic,
         )
 
         return (clip,)
