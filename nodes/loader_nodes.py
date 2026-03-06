@@ -39,15 +39,7 @@ class QuantizedModelLoader:
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
-            },
-            "optional": {
-                "force_dequant": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Force dequantize all weights at load time",
-                    },
-                ),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -58,7 +50,7 @@ class QuantizedModelLoader:
 
 
     def load_checkpoint(
-        self, ckpt_name, quant_format, kernel_backend, force_dequant=False
+        self, ckpt_name, quant_format, kernel_backend, disable_dynamic
     ):
         """Load a checkpoint with the specified quantization format and kernel backend."""
 
@@ -127,7 +119,7 @@ class QuantizedModelLoader:
                 logging.warning(f"QuantizedModelLoader: Format detection failed: {e}")
 
         # Standard loading - ComfyUI handles it
-        sd = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+        sd, metadata = comfy.utils.load_torch_file(ckpt_path, safe_load=True, return_metadata=True)
 
         # Build model from state dict
         try:
@@ -137,25 +129,36 @@ class QuantizedModelLoader:
                 output_clip=True,
                 embedding_directory=folder_paths.get_folder_paths("embeddings"),
                 model_options=model_options,
+                disable_dynamic=disable_dynamic,
+                metadata=metadata,
             )
         except Exception as e:
-            logging.warning(f"QuantizedModelLoader: state_dict load failed, using path fallback: {e}")
+            logging.warning(f"QuantizedModelLoader: state_dict load failed, falling back to path-based loading: {e}")
             out = comfy.sd.load_checkpoint_guess_config(
                 ckpt_path,
                 output_vae=True,
                 output_clip=True,
                 embedding_directory=folder_paths.get_folder_paths("embeddings"),
                 model_options=model_options,
+                disable_dynamic=disable_dynamic,
             )
 
         model = out[0]
         clip = out[1]
         vae = out[2]
 
-        # Force dequantize if requested (useful for debugging)
-        if force_dequant and model is not None:
-            logging.info("QuantizedModelLoader: Force dequantizing model weights")
-            pass
+        # Set cached patcher init for dynamic reloading (mirrors load_checkpoint_guess_config)
+        embedding_directory = folder_paths.get_folder_paths("embeddings")
+        if model is not None:
+            model.cached_patcher_init = (
+                comfy.sd.load_checkpoint_guess_config_model_only,
+                (ckpt_path, embedding_directory, model_options, {}),
+            )
+        if clip is not None:
+            clip.patcher.cached_patcher_init = (
+                comfy.sd.load_checkpoint_guess_config_clip_only,
+                (ckpt_path, embedding_directory, model_options, {}),
+            )
 
         return (model, clip, vae)
 
@@ -253,10 +256,10 @@ class QuantizedUNETLoader:
                 logging.warning(f"QuantizedUNETLoader: Format detection failed: {e}")
 
         # Standard loading - ComfyUI handles it
-        sd = comfy.utils.load_torch_file(unet_path, safe_load=True)
+        sd, metadata = comfy.utils.load_torch_file(unet_path, safe_load=True, return_metadata=True)
 
         # Build model from state dict
-        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, disable_dynamic=disable_dynamic)
+        model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
 
         return (model,)
 
@@ -365,10 +368,10 @@ class QuantizedCLIPLoader:
                 logging.warning(f"QuantizedCLIPLoader: Format detection failed: {e}")
 
             # Standard loading - ComfyUI handles it
-            sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
+            sd, metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
         else:
             # Explicit format: set ops and load
-            sd = comfy.utils.load_torch_file(clip_path, safe_load=True)
+            sd, metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
 
             if quant_format in ("int8_tensorwise", "int8"):
                 try:
