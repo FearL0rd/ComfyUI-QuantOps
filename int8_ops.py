@@ -45,6 +45,7 @@ class HybridINT8Ops(manual_cast):
             self.scale_weight = None
             self.block_size = 128  # Default block size
             self.is_quantized = False
+            self.layout_type = None
             
         def reset_parameters(self):
             return None
@@ -98,6 +99,7 @@ class HybridINT8Ops(manual_cast):
                         is_tensorwise = self.quant_format == 'int8_tensorwise' or (self.quant_format is None and (scale.ndim == 0 or (scale.ndim == 1 and scale.shape[0] == 1)))
                         
                         if is_tensorwise and _HAS_TENSORWISE_INT8_LAYOUT:
+                            self.layout_type = "TensorWiseINT8Layout"
                             layout_params = TensorWiseINT8Layout.Params(
                                 scale=scale.to(torch.float32),
                                 orig_dtype=torch.bfloat16,
@@ -105,11 +107,12 @@ class HybridINT8Ops(manual_cast):
                                 is_weight=True,
                             )
                             self.weight = torch.nn.Parameter(
-                                QuantizedTensor(weight_tensor, "TensorWiseINT8Layout", layout_params),
+                                QuantizedTensor(weight_tensor, self.layout_type, layout_params),
                                 requires_grad=False
                             )
                             logging.debug(f"Loaded INT8 layer {weight_key} with TensorWiseINT8Layout")
                         elif not is_tensorwise and _HAS_INT8_LAYOUT:
+                            self.layout_type = "BlockWiseINT8Layout"
                             # Create QuantizedTensor with BlockWiseINT8Layout
                             layout_params = BlockWiseINT8Layout.Params(
                                 scale=scale.to(torch.float32),
@@ -119,7 +122,7 @@ class HybridINT8Ops(manual_cast):
                                 is_weight=True,
                             )
                             self.weight = torch.nn.Parameter(
-                                QuantizedTensor(weight_tensor, "BlockWiseINT8Layout", layout_params),
+                                QuantizedTensor(weight_tensor, self.layout_type, layout_params),
                                 requires_grad=False
                             )
                             logging.debug(f"Loaded INT8 layer {weight_key} with BlockWiseINT8Layout")
@@ -411,19 +414,33 @@ class HybridINT8Ops(manual_cast):
             return weight
         
         def set_weight(self, weight, inplace_update=False, seed=None, return_weight=False, **kwargs):
-            """Set weight after LoRA patching."""
-            # For now, keep as dequantized (re-quantization is complex for INT8)
+            """Set weight after LoRA patching - requantize if layout is available."""
+            if getattr(self, 'layout_type', None) is not None:
+                # Requantize using the layout's quantize method
+                weight = QuantizedTensor.from_float(
+                    weight, 
+                    self.layout_type, 
+                    scale="recalculate", 
+                    stochastic_rounding=seed if seed else 0,
+                    inplace_ops=True
+                )
+                # Match the weight dtype for proper dispatch
+                if hasattr(self.weight, 'dtype'):
+                    weight = weight.to(self.weight.dtype)
+            else:
+                # Non-quantized path
+                weight = weight.to(self.weight.dtype)
+
             if return_weight:
                 return weight
             
-            if inplace_update:
-                self.weight.data.copy_(weight)
-            else:
-                self.weight = torch.nn.Parameter(weight, requires_grad=False)
+            assert inplace_update is False  # Inplace update not supported with requant
+            self.weight = torch.nn.Parameter(weight, requires_grad=False)
             
-            # Mark as no longer quantized after patching
-            self.is_quantized = False
-            self.scale_weight = None
+            # Since we requantized, we are still quantized, but we let QuantizedTensor handle it
+            self.is_quantized = getattr(self, 'layout_type', None) is not None
+            if self.is_quantized:
+                self.scale_weight = None
     
     # Normalization layers - use standard manual_cast versions
     class GroupNorm(manual_cast.GroupNorm):
