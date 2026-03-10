@@ -302,10 +302,20 @@ class HybridFP8Ops(manual_cast):
                         input = input.reshape(-1, input_shape[2])
                     
                     if input.ndim == 2:
-                        input = QuantizedTensor.from_float(input, "TensorCoreMXFP8Layout")
-                        output = torch.nn.functional.linear(input, weight, bias)
+                        # ck.quantize_mxfp8 only supports fp16/bf16.
+                        # Handle text encoders which natively output FP32
+                        if input.dtype == torch.float32:
+                            orig_dtype = getattr(weight._params, "orig_dtype", torch.bfloat16)
+                            q_input = input.to(orig_dtype)
+                        else:
+                            q_input = input
+                            
+                        q_input = QuantizedTensor.from_float(q_input, "TensorCoreMXFP8Layout")
+                        output = torch.nn.functional.linear(q_input, weight, bias)
                         if tensor_3d:
                             output = output.reshape(input_shape[0], input_shape[1], -1)
+                        if input.dtype == torch.float32:
+                            return output.to(torch.float32)
                         return output
                     else:
                         # Fallback for non-2D: dequantize weight
@@ -322,10 +332,19 @@ class HybridFP8Ops(manual_cast):
                         input = input.reshape(-1, input_shape[2])
                     
                     if input.ndim == 2:
-                        input = QuantizedTensor.from_float(input, "TensorCoreNVFP4Layout")
-                        output = torch.nn.functional.linear(input, weight, bias)
+                        # Handle text encoders which natively output FP32
+                        if input.dtype == torch.float32:
+                            orig_dtype = getattr(weight._params, "orig_dtype", torch.bfloat16)
+                            q_input = input.to(orig_dtype)
+                        else:
+                            q_input = input
+
+                        q_input = QuantizedTensor.from_float(q_input, "TensorCoreNVFP4Layout")
+                        output = torch.nn.functional.linear(q_input, weight, bias)
                         if tensor_3d:
                             output = output.reshape(input_shape[0], input_shape[1], -1)
+                        if input.dtype == torch.float32:
+                            return output.to(torch.float32)
                         return output
                     else:
                         # Fallback for non-2D: dequantize weight
