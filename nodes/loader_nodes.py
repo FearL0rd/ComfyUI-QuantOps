@@ -403,6 +403,158 @@ class QuantizedCLIPLoader:
         return (clip,)
 
 
+class QuantizedDualCLIPLoader:
+    """
+    Load two text encoders with custom quantization layouts (e.g. CLIP-L + T5).
+
+    Either or both encoders may be quantized. The Hybrid ops classes handle
+    mixed quantized/unquantized weights transparently.
+
+    text_encoder2 lists files from both text_encoders and checkpoints folders.
+    When type is 'ltxv', text_encoder2 resolves from checkpoints; otherwise from text_encoders.
+    """
+
+    CLIP_TYPES = [
+        "sdxl",
+        "sd3",
+        "flux",
+        "hunyuan_video",
+        "hidream",
+        "hunyuan_image",
+        "hunyuan_video_15",
+        "kandinsky5",
+        "kandinsky5_image",
+        "ltxv",
+        "newbie",
+        "ace",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        te_list = folder_paths.get_filename_list("text_encoders")
+        te_and_ckpt_list = list(te_list) + list(folder_paths.get_filename_list("checkpoints"))
+        return {
+            "required": {
+                "text_encoder1": (te_list,),
+                "text_encoder2": (te_and_ckpt_list,),
+                "type": (cls.CLIP_TYPES,),
+                "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
+                "kernel_backend": (["pytorch", "triton"],),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = (
+        "Load two quantized text encoders (e.g. CLIP-L + T5). "
+        "int8_tensorwise uses torch._int_mm for fast inference.\n\n"
+        "[Recipes]\n"
+        "sdxl: clip-l, clip-g\n"
+        "sd3: clip-l, clip-g / clip-l, t5 / clip-g, t5\n"
+        "flux: clip-l, t5\n"
+        "hidream: at least one of t5 or llama, recommended t5 and llama\n"
+        "hunyuan_image: qwen2.5vl 7b and byt5 small\n"
+        "newbie: gemma-3-4b-it, jina clip v2"
+    )
+
+    def load_clip(self, text_encoder1, text_encoder2, type, quant_format, kernel_backend, disable_dynamic):
+        """Load two text encoders with quantization support."""
+        import comfy.model_management
+
+        # Configure INT8 kernel backend (only affects INT8 blockwise models)
+        if quant_format == "int8":
+            try:
+                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
+
+                BlockWiseINT8Layout.set_backend(kernel_backend)
+                logging.debug(
+                    f"QuantizedDualCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
+                )
+            except Exception as e:
+                if kernel_backend == "triton":
+                    logging.warning(f"Failed to configure Triton backend: {e}")
+
+        # Resolve paths
+        clip_path1 = folder_paths.get_full_path("text_encoders", text_encoder1)
+
+        # For ltxv, text_encoder2 resolves from checkpoints; otherwise from text_encoders
+        if type == "ltxv":
+            clip_path2 = folder_paths.get_full_path("checkpoints", text_encoder2)
+        else:
+            clip_path2 = folder_paths.get_full_path("text_encoders", text_encoder2)
+
+        # Convert type string to CLIPType enum
+        clip_type = getattr(
+            comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
+        )
+
+        # Set up model options
+        model_options = {
+            "initial_device": comfy.model_management.text_encoder_offload_device()
+        }
+
+        # Load both state dicts
+        sd1, metadata1 = comfy.utils.load_torch_file(clip_path1, safe_load=True, return_metadata=True)
+        sd2, metadata2 = comfy.utils.load_torch_file(clip_path2, safe_load=True, return_metadata=True)
+
+        # Set ops based on quant_format
+        if quant_format == "auto":
+            try:
+                from ..utils.safetensors_loader import detect_quant_format
+                # Detect from first encoder (primary); second may differ
+                detected_format = detect_quant_format(clip_path1)
+                logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder1): {detected_format}")
+
+                if detected_format == "int8_blockwise":
+                    from ..int8_ops import HybridINT8Ops
+                    model_options["custom_operations"] = HybridINT8Ops
+                elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
+                    from ..fp8_ops import HybridFP8Ops
+                    model_options["custom_operations"] = HybridFP8Ops
+
+                # Also check second encoder if first didn't set ops
+                if "custom_operations" not in model_options:
+                    detected_format2 = detect_quant_format(clip_path2)
+                    logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder2): {detected_format2}")
+                    if detected_format2 == "int8_blockwise":
+                        from ..int8_ops import HybridINT8Ops
+                        model_options["custom_operations"] = HybridINT8Ops
+                    elif detected_format2 in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
+                        from ..fp8_ops import HybridFP8Ops
+                        model_options["custom_operations"] = HybridFP8Ops
+            except Exception as e:
+                logging.warning(f"QuantizedDualCLIPLoader: Format detection failed: {e}")
+        elif quant_format in ("int8_tensorwise", "int8"):
+            try:
+                from ..int8_ops import HybridINT8Ops
+                model_options["custom_operations"] = HybridINT8Ops
+                logging.info(f"QuantizedDualCLIPLoader: Using HybridINT8Ops for {quant_format}")
+            except ImportError as e:
+                logging.warning(f"HybridINT8Ops not available: {e}")
+        elif quant_format == "float8_e4m3fn":
+            logging.info("QuantizedDualCLIPLoader: Using ComfyUI built-in for tensor-scaled FP8")
+        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
+            try:
+                from ..fp8_ops import HybridFP8Ops
+                model_options["custom_operations"] = HybridFP8Ops
+                logging.info(f"QuantizedDualCLIPLoader: Using HybridFP8Ops for {quant_format}")
+            except ImportError as e:
+                logging.warning(f"HybridFP8Ops not available: {e}")
+
+        # Load dual text encoders using ComfyUI's API
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            state_dicts=[sd1, sd2],
+            clip_type=clip_type,
+            model_options=model_options,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            disable_dynamic=disable_dynamic,
+        )
+
+        return (clip,)
+
+
 class BNB4bitFluxConfig(comfy.supported_models_base.BASE):
     """Minimal model config for BNB 4-bit Flux models."""
     unet_config = {}
@@ -709,6 +861,7 @@ NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
     "QuantizedUNETLoader": QuantizedUNETLoader,
     "QuantizedCLIPLoader": QuantizedCLIPLoader,
+    "QuantizedDualCLIPLoader": QuantizedDualCLIPLoader,
     "BNB4bitUNETLoader": BNB4bitUNETLoader,
 }
 
@@ -716,6 +869,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedModelLoader": "Load Checkpoint (Quantized)",
     "QuantizedUNETLoader": "Load Diffusion Model (Quantized)",
     "QuantizedCLIPLoader": "Load CLIP (Quantized)",
+    "QuantizedDualCLIPLoader": "Load DualCLIP (Quantized)",
     "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
 }
 
