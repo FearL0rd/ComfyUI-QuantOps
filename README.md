@@ -2,7 +2,8 @@
 
 Extended quantization layouts for ComfyUI, enabling loading and inference with models quantized by [convert_to_quant](https://github.com/silveroxides/convert_to_quant).
 
-This is experimental and due to lack of proper support and merging of PR in ComfyUI, do not expect this to work without putting in the effort. I don't have the time or the energy to keep this up and will close ebtire project if i keep getting bunch of low effort issues posted expecting me go serve a fix up on a silver platter.
+This is experimental and due to lack of proper support and merging of PR in ComfyUI, do not expect this to work without putting in the effort.
+I don't have the time or the energy to keep this up and will close entire project if i keep getting bunch of low effort issues posted expecting me go serve a fix up on a silver platter.
 
 ### tl;dr Go complain at ComfyOrg. Not here.
 
