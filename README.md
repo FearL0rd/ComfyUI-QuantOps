@@ -2,14 +2,10 @@
 
 Extended quantization layouts for ComfyUI, enabling loading and inference with models quantized by [convert_to_quant](https://github.com/silveroxides/convert_to_quant).
 
-## Supported Formats
+This is experimental and due to lack of proper support and merging of PR in ComfyUI, do not expect this to work without putting in the effort. I don't have the time or the energy to keep this up and will close ebtire project if i keep getting bunch of low effort issues posted expecting me go serve a fix up on a silver platter.
 
-| Format | Layout | quant_format | Status |
-|--------|--------|--------------|--------|
-| FP8 (tensor-wise) | `TensorCoreFP8Layout` | `float8_e4m3fn` | Supported (ComfyUI built-in) |
-| FP8 (row-wise) | `RowWiseFP8Layout` | `float8_e4m3fn_rowwise` | WIP |
-| FP8 (block-wise) | `BlockWiseFP8Layout` | `float8_e4m3fn_blockwise` | WIP |
-| INT8 (block-wise) | `BlockWiseINT8Layout` | `int8` | Supported |
+### tl;dr Go complain at ComfyOrg. Not here.
+
 
 ## Installation
 
