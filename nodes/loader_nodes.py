@@ -72,33 +72,15 @@ class QuantizedModelLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format in ("int8_tensorwise", "int8"):
+        if quant_format != "auto":
             try:
-                from ..int8_ops import HybridINT8Ops
-
-                model_options = {"custom_operations": HybridINT8Ops}
+                from ..unified_ops import UnifiedQuantOps
+                model_options = {"custom_operations": UnifiedQuantOps}
                 logging.info(
-                    f"QuantizedModelLoader: Using HybridINT8Ops for {quant_format} models"
+                    f"QuantizedModelLoader: Using UnifiedQuantOps for {quant_format} models"
                 )
             except ImportError as e:
-                logging.warning(f"HybridINT8Ops not available: {e}")
-        elif quant_format == "float8_e4m3fn":
-            # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
-            # No custom ops needed, TensorCoreFP8Layout handles it correctly
-            logging.info(
-                "QuantizedModelLoader: Using ComfyUI built-in for tensor-scaled FP8"
-            )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
-            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
-            try:
-                from ..fp8_ops import HybridFP8Ops
-
-                model_options = {"custom_operations": HybridFP8Ops}
-                logging.info(
-                    f"QuantizedModelLoader: Using HybridFP8Ops for {quant_format} models"
-                )
-            except ImportError as e:
-                logging.warning(f"HybridFP8Ops not available: {e}")
+                logging.warning(f"UnifiedQuantOps not available: {e}")
 
         # Load state dict
         if quant_format == "auto":
@@ -108,13 +90,9 @@ class QuantizedModelLoader:
                 detected_format = detect_quant_format(ckpt_path)
                 logging.info(f"QuantizedModelLoader: Auto-detected format: {detected_format}")
 
-                # Select ops based on detected format
-                if detected_format in ("int8_tensorwise", "int8_blockwise"):
-                    from ..int8_ops import HybridINT8Ops
-                    model_options = {"custom_operations": HybridINT8Ops}
-                elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-                    from ..fp8_ops import HybridFP8Ops
-                    model_options = {"custom_operations": HybridFP8Ops}
+                # Unconditionally use UnifiedQuantOps so we handle mixed formats perfectly
+                from ..unified_ops import UnifiedQuantOps
+                model_options = {"custom_operations": UnifiedQuantOps}
             except Exception as e:
                 logging.warning(f"QuantizedModelLoader: Format detection failed: {e}")
 
@@ -212,30 +190,13 @@ class QuantizedUNETLoader:
 
         # Select ops class based on quant_format
         model_options = {}
-        if quant_format in ("int8_tensorwise", "int8"):
+        if quant_format != "auto":
             try:
-                from ..int8_ops import HybridINT8Ops
-
-                model_options = {"custom_operations": HybridINT8Ops}
-                logging.info(f"QuantizedUNETLoader: Using HybridINT8Ops for {quant_format} models")
+                from ..unified_ops import UnifiedQuantOps
+                model_options = {"custom_operations": UnifiedQuantOps}
+                logging.info(f"QuantizedUNETLoader: Using UnifiedQuantOps for {quant_format} models")
             except ImportError as e:
-                logging.warning(f"HybridINT8Ops not available: {e}")
-        elif quant_format == "float8_e4m3fn":
-            # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
-            logging.info(
-                "QuantizedUNETLoader: Using ComfyUI built-in for tensor-scaled FP8"
-            )
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
-            # Block-wise, row-wise, MXFP8, Hybrid MXFP8, or NVFP4 - use HybridFP8Ops
-            try:
-                from ..fp8_ops import HybridFP8Ops
-
-                model_options = {"custom_operations": HybridFP8Ops}
-                logging.info(
-                    f"QuantizedUNETLoader: Using HybridFP8Ops for {quant_format} models"
-                )
-            except ImportError as e:
-                logging.warning(f"HybridFP8Ops not available: {e}")
+                logging.warning(f"UnifiedQuantOps not available: {e}")
 
         # Load state dict
         if quant_format == "auto":
@@ -245,13 +206,9 @@ class QuantizedUNETLoader:
                 detected_format = detect_quant_format(unet_path)
                 logging.info(f"QuantizedUNETLoader: Auto-detected format: {detected_format}")
 
-                # Select ops based on detected format
-                if detected_format in ("int8_tensorwise", "int8_blockwise"):
-                    from ..int8_ops import HybridINT8Ops
-                    model_options = {"custom_operations": HybridINT8Ops}
-                elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-                    from ..fp8_ops import HybridFP8Ops
-                    model_options = {"custom_operations": HybridFP8Ops}
+                # Unconditionally use UnifiedQuantOps so we handle mixed formats perfectly
+                from ..unified_ops import UnifiedQuantOps
+                model_options = {"custom_operations": UnifiedQuantOps}
             except Exception as e:
                 logging.warning(f"QuantizedUNETLoader: Format detection failed: {e}")
 
@@ -358,12 +315,9 @@ class QuantizedCLIPLoader:
                 # Select ops based on detected format
                 if detected_format == "int8_tensorwise":
                     pass # Handled natively by ComfyUI
-                elif detected_format == "int8_blockwise":
-                    from ..int8_ops import HybridINT8Ops
-                    model_options["custom_operations"] = HybridINT8Ops
-                elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-                    from ..fp8_ops import HybridFP8Ops
-                    model_options["custom_operations"] = HybridFP8Ops
+                else:
+                    from ..unified_ops import UnifiedQuantOps
+                    model_options["custom_operations"] = UnifiedQuantOps
             except Exception as e:
                 logging.warning(f"QuantizedCLIPLoader: Format detection failed: {e}")
 
@@ -373,23 +327,12 @@ class QuantizedCLIPLoader:
             # Explicit format: set ops and load
             sd, metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
 
-            if quant_format in ("int8_tensorwise", "int8"):
-                try:
-                    from ..int8_ops import HybridINT8Ops
-                    model_options["custom_operations"] = HybridINT8Ops
-                    logging.info(f"QuantizedCLIPLoader: Using HybridINT8Ops for {quant_format} text encoder")
-                except ImportError as e:
-                    logging.warning(f"HybridINT8Ops not available: {e}")
-            elif quant_format == "float8_e4m3fn":
-                # Standard tensor-scaled FP8 - use ComfyUI's built-in handling
-                logging.info("QuantizedCLIPLoader: Using ComfyUI built-in for tensor-scaled FP8")
-            elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
-                try:
-                    from ..fp8_ops import HybridFP8Ops
-                    model_options["custom_operations"] = HybridFP8Ops
-                    logging.info(f"QuantizedCLIPLoader: Using HybridFP8Ops for {quant_format}")
-                except ImportError as e:
-                    logging.warning(f"HybridFP8Ops not available: {e}")
+            try:
+                from ..unified_ops import UnifiedQuantOps
+                model_options["custom_operations"] = UnifiedQuantOps
+                logging.info(f"QuantizedCLIPLoader: Using UnifiedQuantOps for {quant_format}")
+            except ImportError as e:
+                logging.warning(f"UnifiedQuantOps not available: {e}")
 
         # Load text encoder using ComfyUI's API
         clip = comfy.sd.load_text_encoder_state_dicts(
@@ -507,41 +450,24 @@ class QuantizedDualCLIPLoader:
                 detected_format = detect_quant_format(clip_path1)
                 logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder1): {detected_format}")
 
-                if detected_format == "int8_blockwise":
-                    from ..int8_ops import HybridINT8Ops
-                    model_options["custom_operations"] = HybridINT8Ops
-                elif detected_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-                    from ..fp8_ops import HybridFP8Ops
-                    model_options["custom_operations"] = HybridFP8Ops
+                from ..unified_ops import UnifiedQuantOps
+                model_options["custom_operations"] = UnifiedQuantOps
 
                 # Also check second encoder if first didn't set ops
                 if "custom_operations" not in model_options:
                     detected_format2 = detect_quant_format(clip_path2)
                     logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder2): {detected_format2}")
-                    if detected_format2 == "int8_blockwise":
-                        from ..int8_ops import HybridINT8Ops
-                        model_options["custom_operations"] = HybridINT8Ops
-                    elif detected_format2 in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "nvfp4"):
-                        from ..fp8_ops import HybridFP8Ops
-                        model_options["custom_operations"] = HybridFP8Ops
+                    from ..unified_ops import UnifiedQuantOps
+                    model_options["custom_operations"] = UnifiedQuantOps
             except Exception as e:
                 logging.warning(f"QuantizedDualCLIPLoader: Format detection failed: {e}")
-        elif quant_format in ("int8_tensorwise", "int8"):
+        else:
             try:
-                from ..int8_ops import HybridINT8Ops
-                model_options["custom_operations"] = HybridINT8Ops
-                logging.info(f"QuantizedDualCLIPLoader: Using HybridINT8Ops for {quant_format}")
+                from ..unified_ops import UnifiedQuantOps
+                model_options["custom_operations"] = UnifiedQuantOps
+                logging.info(f"QuantizedDualCLIPLoader: Using UnifiedQuantOps for {quant_format}")
             except ImportError as e:
-                logging.warning(f"HybridINT8Ops not available: {e}")
-        elif quant_format == "float8_e4m3fn":
-            logging.info("QuantizedDualCLIPLoader: Using ComfyUI built-in for tensor-scaled FP8")
-        elif quant_format in ("float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"):
-            try:
-                from ..fp8_ops import HybridFP8Ops
-                model_options["custom_operations"] = HybridFP8Ops
-                logging.info(f"QuantizedDualCLIPLoader: Using HybridFP8Ops for {quant_format}")
-            except ImportError as e:
-                logging.warning(f"HybridFP8Ops not available: {e}")
+                logging.warning(f"UnifiedQuantOps not available: {e}")
 
         # Load dual text encoders using ComfyUI's API
         clip = comfy.sd.load_text_encoder_state_dicts(
@@ -856,12 +782,97 @@ class BNB4bitUNETLoader:
         return (patcher,)
 
 
+class QuantizedModelLoaderSimple:
+    """Simple loader for quantized models (no format or backend selection)."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
+            },
+        }
+    RETURN_TYPES = ("MODEL", "CLIP", "VAE")
+    FUNCTION = "load_checkpoint"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Simple loader for custom quantized models. Automatically detects formats."
+
+    def load_checkpoint(self, ckpt_name, disable_dynamic):
+        return QuantizedModelLoader().load_checkpoint(ckpt_name, "auto", "pytorch", disable_dynamic)
+
+
+class QuantizedUNETLoaderSimple:
+    """Simple loader for quantized UNET models (no format or backend selection)."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
+            },
+        }
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Simple loader for custom quantized diffusion models. Automatically detects formats."
+
+    def load_unet(self, unet_name, disable_dynamic):
+        return QuantizedUNETLoader().load_unet(unet_name, "auto", "pytorch", disable_dynamic)
+
+
+class QuantizedCLIPLoaderSimple:
+    """Simple loader for quantized CLIP models (no format or backend selection)."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip_name": (folder_paths.get_filename_list("text_encoders"),),
+                "type": (QuantizedCLIPLoader.CLIP_TYPES,),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
+            },
+        }
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Simple loader for custom quantized text encoders. Automatically detects formats."
+
+    def load_clip(self, clip_name, type, disable_dynamic):
+        return QuantizedCLIPLoader().load_clip(clip_name, type, "auto", "pytorch", disable_dynamic)
+
+
+class QuantizedDualCLIPLoaderSimple:
+    """Simple loader for dual quantized CLIP models (no format or backend selection)."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        te_list = folder_paths.get_filename_list("text_encoders")
+        te_and_ckpt_list = list(te_list) + list(folder_paths.get_filename_list("checkpoints"))
+        return {
+            "required": {
+                "text_encoder1": (te_list,),
+                "text_encoder2": (te_and_ckpt_list,),
+                "type": (QuantizedDualCLIPLoader.CLIP_TYPES,),
+                "disable_dynamic": ("BOOLEAN", {"default": True}),
+            },
+        }
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load_clip"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Simple loader for dual custom quantized text encoders. Automatically detects formats."
+
+    def load_clip(self, text_encoder1, text_encoder2, type, disable_dynamic):
+        return QuantizedDualCLIPLoader().load_clip(text_encoder1, text_encoder2, type, "auto", "pytorch", disable_dynamic)
+
+
 # ComfyUI node registration
 NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
     "QuantizedUNETLoader": QuantizedUNETLoader,
     "QuantizedCLIPLoader": QuantizedCLIPLoader,
     "QuantizedDualCLIPLoader": QuantizedDualCLIPLoader,
+    "QuantizedModelLoaderSimple": QuantizedModelLoaderSimple,
+    "QuantizedUNETLoaderSimple": QuantizedUNETLoaderSimple,
+    "QuantizedCLIPLoaderSimple": QuantizedCLIPLoaderSimple,
+    "QuantizedDualCLIPLoaderSimple": QuantizedDualCLIPLoaderSimple,
     "BNB4bitUNETLoader": BNB4bitUNETLoader,
 }
 
@@ -870,6 +881,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedUNETLoader": "Load Diffusion Model (Quantized)",
     "QuantizedCLIPLoader": "Load CLIP (Quantized)",
     "QuantizedDualCLIPLoader": "Load DualCLIP (Quantized)",
+    "QuantizedModelLoaderSimple": "Load Checkpoint (Quantized, Simple)",
+    "QuantizedUNETLoaderSimple": "Load Diffusion Model (Quantized, Simple)",
+    "QuantizedCLIPLoaderSimple": "Load CLIP (Quantized, Simple)",
+    "QuantizedDualCLIPLoaderSimple": "Load DualCLIP (Quantized, Simple)",
     "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
 }
 
