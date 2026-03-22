@@ -347,6 +347,30 @@ class UnifiedQuantOps(manual_cast):
                     else:
                         return torch.nn.functional.linear(input.reshape(input_shape), weight.dequantize(), bias)
 
+                if self.layout_type in ["TensorCoreFP8Layout", "TensorCoreFP8E4M3Layout", "TensorCoreFP8E5M2Layout"]:
+                    input_shape = input.shape
+                    tensor_3d = input.ndim == 3
+                    
+                    if tensor_3d:
+                        input = input.reshape(-1, input_shape[2])
+                    
+                    if input.ndim == 2:
+                        if input.dtype == torch.float32:
+                            orig_dtype = getattr(weight._params, "orig_dtype", torch.bfloat16)
+                            q_input = input.to(orig_dtype)
+                        else:
+                            q_input = input
+
+                        q_input = QuantizedTensor.from_float(q_input, self.layout_type, scale=getattr(self, 'input_scale', None))
+                        output = torch.nn.functional.linear(q_input, weight, bias)
+                        if tensor_3d:
+                            output = output.reshape(input_shape[0], input_shape[1], -1)
+                        if input.dtype == torch.float32:
+                            return output.to(torch.float32)
+                        return output
+                    else:
+                        return torch.nn.functional.linear(input.reshape(input_shape), weight.dequantize(), bias)
+
                 # Default trigger for QuantizedTensor dispatch -> layout-specific handler
                 return torch.nn.functional.linear(input, weight, bias)
 
