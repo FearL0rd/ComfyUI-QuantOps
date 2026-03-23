@@ -39,7 +39,7 @@ class QuantizedModelLoader:
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -160,7 +160,7 @@ class QuantizedUNETLoader:
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -265,7 +265,7 @@ class QuantizedCLIPLoader:
                 "type": (cls.CLIP_TYPES,),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -383,7 +383,7 @@ class QuantizedDualCLIPLoader:
                 "type": (cls.CLIP_TYPES,),
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -789,7 +789,7 @@ class QuantizedModelLoaderSimple:
         return {
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
@@ -808,7 +808,7 @@ class QuantizedUNETLoaderSimple:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
     RETURN_TYPES = ("MODEL",)
@@ -828,7 +828,7 @@ class QuantizedCLIPLoaderSimple:
             "required": {
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (QuantizedCLIPLoader.CLIP_TYPES,),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
     RETURN_TYPES = ("CLIP",)
@@ -851,7 +851,7 @@ class QuantizedDualCLIPLoaderSimple:
                 "text_encoder1": (te_list,),
                 "text_encoder2": (te_and_ckpt_list,),
                 "type": (QuantizedDualCLIPLoader.CLIP_TYPES,),
-                "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "disable_dynamic": ("BOOLEAN", {"default": False}),
             },
         }
     RETURN_TYPES = ("CLIP",)
