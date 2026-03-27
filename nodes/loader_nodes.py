@@ -892,6 +892,41 @@ class QuantizedDualCLIPLoaderSimple:
         return QuantizedDualCLIPLoader().load_clip(text_encoder1, text_encoder2, type, "auto", "pytorch", disable_dynamic)
 
 
+class QuantizedVAELoader:
+    """
+    Load VAE models using direct safetensors loading, bypassing aimdo/dynamic VRAM.
+
+    Uses UnifiedSafetensorsLoader when available to avoid ComfyUI's aimdo mmap layer,
+    then constructs the VAE via comfy.sd.VAE(sd=..., metadata=...).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vae_name": (folder_paths.get_filename_list("vae"),),
+            },
+        }
+
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "load_vae"
+    CATEGORY = "loaders/quantized"
+    DESCRIPTION = "Load VAE models with direct safetensors loading (bypasses aimdo/dynamic VRAM)."
+
+    def load_vae(self, vae_name):
+        """Load a VAE model, bypassing aimdo/dynamic VRAM."""
+        vae_path = folder_paths.get_full_path("vae", vae_name)
+
+        # Load safetensors directly, bypassing aimdo/dynamic VRAM
+        sd, metadata = _load_safetensors(vae_path)
+
+        # Construct VAE from state dict (comfy.sd.VAE auto-detects architecture)
+        vae = comfy.sd.VAE(sd=sd, metadata=metadata)
+        vae.throw_exception_if_invalid()
+
+        return (vae,)
+
+
 # ComfyUI node registration
 NODE_CLASS_MAPPINGS = {
     "QuantizedModelLoader": QuantizedModelLoader,
@@ -903,6 +938,7 @@ NODE_CLASS_MAPPINGS = {
     "QuantizedCLIPLoaderSimple": QuantizedCLIPLoaderSimple,
     "QuantizedDualCLIPLoaderSimple": QuantizedDualCLIPLoaderSimple,
     "BNB4bitUNETLoader": BNB4bitUNETLoader,
+    "QuantizedVAELoader": QuantizedVAELoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -915,6 +951,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedCLIPLoaderSimple": "Load CLIP (Quantized, Simple)",
     "QuantizedDualCLIPLoaderSimple": "Load DualCLIP (Quantized, Simple)",
     "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
+    "QuantizedVAELoader": "Load VAE (No Dynamic VRAM)",
 }
 
 
