@@ -18,6 +18,35 @@ import comfy.supported_models_base
 import comfy.latent_formats
 import comfy.conds
 
+# Try to import UnifiedSafetensorsLoader for aimdo-free loading
+try:
+    from unifiedefficientloader import UnifiedSafetensorsLoader
+    _UNIFIED_LOADER_AVAILABLE = True
+except ImportError:
+    _UNIFIED_LOADER_AVAILABLE = False
+
+
+def _load_safetensors(filepath):
+    """Load a safetensors file, bypassing comfy_aimdo/dynamic VRAM when possible.
+
+    Uses UnifiedSafetensorsLoader if available, otherwise falls back to
+    comfy.utils.load_torch_file.
+
+    Returns:
+        Tuple of (state_dict, metadata)
+    """
+    if _UNIFIED_LOADER_AVAILABLE:
+        with UnifiedSafetensorsLoader(filepath, low_memory=False) as loader:
+            sd = {key: loader.get_tensor(key) for key in loader.keys()}
+            metadata = loader.metadata() or {}
+        return sd, metadata
+    else:
+        logging.warning(
+            "unifiedefficientloader not installed, falling back to comfy.utils.load_torch_file "
+            "(aimdo/dynamic VRAM will be active). Install with: pip install unifiedefficientloader"
+        )
+        return comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
+
 
 class QuantizedModelLoader:
     """
@@ -96,8 +125,8 @@ class QuantizedModelLoader:
             except Exception as e:
                 logging.warning(f"QuantizedModelLoader: Format detection failed: {e}")
 
-        # Standard loading - ComfyUI handles it
-        sd, metadata = comfy.utils.load_torch_file(ckpt_path, safe_load=True, return_metadata=True)
+        # Load safetensors directly, bypassing aimdo/dynamic VRAM
+        sd, metadata = _load_safetensors(ckpt_path)
 
         # Build model from state dict
         try:
@@ -212,8 +241,8 @@ class QuantizedUNETLoader:
             except Exception as e:
                 logging.warning(f"QuantizedUNETLoader: Format detection failed: {e}")
 
-        # Standard loading - ComfyUI handles it
-        sd, metadata = comfy.utils.load_torch_file(unet_path, safe_load=True, return_metadata=True)
+        # Load safetensors directly, bypassing aimdo/dynamic VRAM
+        sd, metadata = _load_safetensors(unet_path)
 
         # Build model from state dict
         model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
@@ -321,11 +350,11 @@ class QuantizedCLIPLoader:
             except Exception as e:
                 logging.warning(f"QuantizedCLIPLoader: Format detection failed: {e}")
 
-            # Standard loading - ComfyUI handles it
-            sd, metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
+            # Load safetensors directly, bypassing aimdo/dynamic VRAM
+            sd, metadata = _load_safetensors(clip_path)
         else:
-            # Explicit format: set ops and load
-            sd, metadata = comfy.utils.load_torch_file(clip_path, safe_load=True, return_metadata=True)
+            # Explicit format: load safetensors directly, bypassing aimdo/dynamic VRAM
+            sd, metadata = _load_safetensors(clip_path)
 
             try:
                 from ..unified_ops import UnifiedQuantOps
@@ -438,9 +467,9 @@ class QuantizedDualCLIPLoader:
             "initial_device": comfy.model_management.text_encoder_offload_device()
         }
 
-        # Load both state dicts
-        sd1, metadata1 = comfy.utils.load_torch_file(clip_path1, safe_load=True, return_metadata=True)
-        sd2, metadata2 = comfy.utils.load_torch_file(clip_path2, safe_load=True, return_metadata=True)
+        # Load both state dicts directly, bypassing aimdo/dynamic VRAM
+        sd1, metadata1 = _load_safetensors(clip_path1)
+        sd2, metadata2 = _load_safetensors(clip_path2)
 
         # Set ops based on quant_format
         if quant_format == "auto":
