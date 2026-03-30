@@ -26,7 +26,7 @@ except ImportError:
     _UNIFIED_LOADER_AVAILABLE = False
 
 
-def _load_safetensors(filepath):
+def _load_safetensors(filepath, low_memory=True):
     """Load a safetensors file, bypassing comfy_aimdo/dynamic VRAM when possible.
 
     Uses UnifiedSafetensorsLoader if available, otherwise falls back to
@@ -36,7 +36,7 @@ def _load_safetensors(filepath):
         Tuple of (state_dict, metadata)
     """
     if _UNIFIED_LOADER_AVAILABLE:
-        with UnifiedSafetensorsLoader(filepath, low_memory=False) as loader:
+        with UnifiedSafetensorsLoader(filepath, low_memory=low_memory) as loader:
             sd = {key: loader.get_tensor(key) for key in loader.keys()}
             metadata = loader.metadata() or {}
         return sd, metadata
@@ -69,6 +69,7 @@ class QuantizedModelLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
 
@@ -79,7 +80,7 @@ class QuantizedModelLoader:
 
 
     def load_checkpoint(
-        self, ckpt_name, quant_format, kernel_backend, disable_dynamic
+        self, ckpt_name, quant_format, kernel_backend, disable_dynamic, low_memory
     ):
         """Load a checkpoint with the specified quantization format and kernel backend."""
 
@@ -126,7 +127,7 @@ class QuantizedModelLoader:
                 logging.warning(f"QuantizedModelLoader: Format detection failed: {e}")
 
         # Load safetensors directly, bypassing aimdo/dynamic VRAM
-        sd, metadata = _load_safetensors(ckpt_path)
+        sd, metadata = _load_safetensors(ckpt_path, low_memory=low_memory)
 
         # Build model from state dict
         try:
@@ -190,6 +191,7 @@ class QuantizedUNETLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
 
@@ -198,7 +200,7 @@ class QuantizedUNETLoader:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Load diffusion models with custom quantization support. int8_tensorwise uses torch._int_mm for fast inference."
 
-    def load_unet(self, unet_name, quant_format, kernel_backend, disable_dynamic):
+    def load_unet(self, unet_name, quant_format, kernel_backend, disable_dynamic, low_memory):
         """Load a UNET model with the specified settings."""
 
         # Set kernel backend (only for INT8 blockwise format)
@@ -242,7 +244,7 @@ class QuantizedUNETLoader:
                 logging.warning(f"QuantizedUNETLoader: Format detection failed: {e}")
 
         # Load safetensors directly, bypassing aimdo/dynamic VRAM
-        sd, metadata = _load_safetensors(unet_path)
+        sd, metadata = _load_safetensors(unet_path, low_memory=low_memory)
 
         # Build model from state dict
         model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
@@ -295,6 +297,7 @@ class QuantizedCLIPLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
 
@@ -303,7 +306,7 @@ class QuantizedCLIPLoader:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Load quantized text encoders (CLIP, T5, etc.). int8_tensorwise uses torch._int_mm for fast inference."
 
-    def load_clip(self, clip_name, type, quant_format, kernel_backend, disable_dynamic):
+    def load_clip(self, clip_name, type, quant_format, kernel_backend, disable_dynamic, low_memory):
         """Load a CLIP/text encoder with quantization support."""
         import comfy.model_management
 
@@ -351,10 +354,10 @@ class QuantizedCLIPLoader:
                 logging.warning(f"QuantizedCLIPLoader: Format detection failed: {e}")
 
             # Load safetensors directly, bypassing aimdo/dynamic VRAM
-            sd, metadata = _load_safetensors(clip_path)
+            sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
         else:
             # Explicit format: load safetensors directly, bypassing aimdo/dynamic VRAM
-            sd, metadata = _load_safetensors(clip_path)
+            sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
 
             try:
                 from ..unified_ops import UnifiedQuantOps
@@ -413,6 +416,7 @@ class QuantizedDualCLIPLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
 
@@ -431,7 +435,7 @@ class QuantizedDualCLIPLoader:
         "newbie: gemma-3-4b-it, jina clip v2"
     )
 
-    def load_clip(self, text_encoder1, text_encoder2, type, quant_format, kernel_backend, disable_dynamic):
+    def load_clip(self, text_encoder1, text_encoder2, type, quant_format, kernel_backend, disable_dynamic, low_memory):
         """Load two text encoders with quantization support."""
         import comfy.model_management
 
@@ -468,8 +472,8 @@ class QuantizedDualCLIPLoader:
         }
 
         # Load both state dicts directly, bypassing aimdo/dynamic VRAM
-        sd1, metadata1 = _load_safetensors(clip_path1)
-        sd2, metadata2 = _load_safetensors(clip_path2)
+        sd1, metadata1 = _load_safetensors(clip_path1, low_memory=low_memory)
+        sd2, metadata2 = _load_safetensors(clip_path2, low_memory=low_memory)
 
         # Set ops based on quant_format
         if quant_format == "auto":
@@ -819,6 +823,7 @@ class QuantizedModelLoaderSimple:
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
@@ -826,8 +831,8 @@ class QuantizedModelLoaderSimple:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Simple loader for custom quantized models. Automatically detects formats."
 
-    def load_checkpoint(self, ckpt_name, disable_dynamic):
-        return QuantizedModelLoader().load_checkpoint(ckpt_name, "auto", "pytorch", disable_dynamic)
+    def load_checkpoint(self, ckpt_name, disable_dynamic, low_memory):
+        return QuantizedModelLoader().load_checkpoint(ckpt_name, "auto", "pytorch", disable_dynamic, low_memory)
 
 
 class QuantizedUNETLoaderSimple:
@@ -838,6 +843,7 @@ class QuantizedUNETLoaderSimple:
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
     RETURN_TYPES = ("MODEL",)
@@ -845,8 +851,8 @@ class QuantizedUNETLoaderSimple:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Simple loader for custom quantized diffusion models. Automatically detects formats."
 
-    def load_unet(self, unet_name, disable_dynamic):
-        return QuantizedUNETLoader().load_unet(unet_name, "auto", "pytorch", disable_dynamic)
+    def load_unet(self, unet_name, disable_dynamic, low_memory):
+        return QuantizedUNETLoader().load_unet(unet_name, "auto", "pytorch", disable_dynamic, low_memory)
 
 
 class QuantizedCLIPLoaderSimple:
@@ -858,6 +864,7 @@ class QuantizedCLIPLoaderSimple:
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (QuantizedCLIPLoader.CLIP_TYPES,),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
     RETURN_TYPES = ("CLIP",)
@@ -865,8 +872,8 @@ class QuantizedCLIPLoaderSimple:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Simple loader for custom quantized text encoders. Automatically detects formats."
 
-    def load_clip(self, clip_name, type, disable_dynamic):
-        return QuantizedCLIPLoader().load_clip(clip_name, type, "auto", "pytorch", disable_dynamic)
+    def load_clip(self, clip_name, type, disable_dynamic, low_memory):
+        return QuantizedCLIPLoader().load_clip(clip_name, type, "auto", "pytorch", disable_dynamic, low_memory)
 
 
 class QuantizedDualCLIPLoaderSimple:
@@ -881,6 +888,8 @@ class QuantizedDualCLIPLoaderSimple:
                 "text_encoder2": (te_and_ckpt_list,),
                 "type": (QuantizedDualCLIPLoader.CLIP_TYPES,),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+
             },
         }
     RETURN_TYPES = ("CLIP",)
@@ -888,11 +897,11 @@ class QuantizedDualCLIPLoaderSimple:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Simple loader for dual custom quantized text encoders. Automatically detects formats."
 
-    def load_clip(self, text_encoder1, text_encoder2, type, disable_dynamic):
-        return QuantizedDualCLIPLoader().load_clip(text_encoder1, text_encoder2, type, "auto", "pytorch", disable_dynamic)
+    def load_clip(self, text_encoder1, text_encoder2, type, disable_dynamic, low_memory):
+        return QuantizedDualCLIPLoader().load_clip(text_encoder1, text_encoder2, type, "auto", "pytorch", disable_dynamic, low_memory)
 
 
-class QuantizedVAELoader:
+class EfficientVAELoader:
     """
     Load VAE models using direct safetensors loading, bypassing aimdo/dynamic VRAM.
 
@@ -905,6 +914,7 @@ class QuantizedVAELoader:
         return {
             "required": {
                 "vae_name": (folder_paths.get_filename_list("vae"),),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
             },
         }
 
@@ -913,12 +923,12 @@ class QuantizedVAELoader:
     CATEGORY = "loaders/quantized"
     DESCRIPTION = "Load VAE models with direct safetensors loading (bypasses aimdo/dynamic VRAM)."
 
-    def load_vae(self, vae_name):
+    def load_vae(self, vae_name, low_memory):
         """Load a VAE model, bypassing aimdo/dynamic VRAM."""
         vae_path = folder_paths.get_full_path("vae", vae_name)
 
         # Load safetensors directly, bypassing aimdo/dynamic VRAM
-        sd, metadata = _load_safetensors(vae_path)
+        sd, metadata = _load_safetensors(vae_path, low_memory=low_memory)
 
         # Construct VAE from state dict (comfy.sd.VAE auto-detects architecture)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
@@ -938,7 +948,7 @@ NODE_CLASS_MAPPINGS = {
     "QuantizedCLIPLoaderSimple": QuantizedCLIPLoaderSimple,
     "QuantizedDualCLIPLoaderSimple": QuantizedDualCLIPLoaderSimple,
     "BNB4bitUNETLoader": BNB4bitUNETLoader,
-    "QuantizedVAELoader": QuantizedVAELoader,
+    "EfficientVAELoader": EfficientVAELoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -951,7 +961,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "QuantizedCLIPLoaderSimple": "Load CLIP (Quantized, Simple)",
     "QuantizedDualCLIPLoaderSimple": "Load DualCLIP (Quantized, Simple)",
     "BNB4bitUNETLoader": "Load Diffusion Model (BNB 4-bit)",
-    "QuantizedVAELoader": "Load VAE (No Dynamic VRAM)",
+    "EfficientVAELoader": "Load VAE (No Dynamic VRAM)",
 }
 
 
