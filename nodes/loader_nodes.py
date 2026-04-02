@@ -36,10 +36,15 @@ def _load_safetensors(filepath, low_memory=True):
         Tuple of (state_dict, metadata)
     """
     if _UNIFIED_LOADER_AVAILABLE:
-        with UnifiedSafetensorsLoader(filepath, low_memory=low_memory) as loader:
-            sd = {key: loader.get_tensor(key) for key in loader.keys()}
-            metadata = loader.metadata() or {}
-        return sd, metadata
+        if low_memory:
+            logging.info(f"Loading {filepath} with UnifiedSafetensorsLoader in low memory mode (fast, efficient, minimal VRAM impact)")
+            with UnifiedSafetensorsLoader(filepath, low_memory=low_memory) as loader:
+                sd = {key: loader.get_tensor(key) for key in loader.keys()}
+                metadata = loader.metadata() or {}
+            return sd, metadata
+        else:
+            logging.info(f"Loading {filepath} with comfy.utils.load_torch_file (aimdo/dynamic VRAM will be active)")
+            return comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
     else:
         logging.warning(
             "unifiedefficientloader not installed, falling back to comfy.utils.load_torch_file "
@@ -69,7 +74,7 @@ class QuantizedModelLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
 
@@ -191,7 +196,7 @@ class QuantizedUNETLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
 
@@ -297,7 +302,7 @@ class QuantizedCLIPLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
 
@@ -416,7 +421,7 @@ class QuantizedDualCLIPLoader:
                 "quant_format": (["auto", "int8", "int8_tensorwise", "float8_e4m3fn", "float8_e4m3fn_blockwise", "float8_e4m3fn_rowwise", "mxfp8", "hybrid_mxfp8", "nvfp4"],),
                 "kernel_backend": (["pytorch", "triton"],),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
 
@@ -823,7 +828,7 @@ class QuantizedModelLoaderSimple:
             "required": {
                 "ckpt_name": (folder_paths.get_filename_list("checkpoints"),),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
     RETURN_TYPES = ("MODEL", "CLIP", "VAE")
@@ -843,7 +848,7 @@ class QuantizedUNETLoaderSimple:
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
     RETURN_TYPES = ("MODEL",)
@@ -864,7 +869,7 @@ class QuantizedCLIPLoaderSimple:
                 "clip_name": (folder_paths.get_filename_list("text_encoders"),),
                 "type": (QuantizedCLIPLoader.CLIP_TYPES,),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
     RETURN_TYPES = ("CLIP",)
@@ -888,7 +893,7 @@ class QuantizedDualCLIPLoaderSimple:
                 "text_encoder2": (te_and_ckpt_list,),
                 "type": (QuantizedDualCLIPLoader.CLIP_TYPES,),
                 "disable_dynamic": ("BOOLEAN", {"default": True}),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
 
             },
         }
@@ -914,7 +919,7 @@ class EfficientVAELoader:
         return {
             "required": {
                 "vae_name": (folder_paths.get_filename_list("vae"),),
-                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model."}),
+                "low_memory": ("BOOLEAN", {"default": True, "tooltip": "Use fast and efficient low impact loading of model. Set to False to use comfy's default loading."}),
             },
         }
 
