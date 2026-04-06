@@ -148,7 +148,8 @@ def _configure_int8_backend(kernel_backend):
 
 
 def _build_model_options(quant_format, sd, metadata, kernel_backend="pytorch",
-                         base_options=None, te_quant_info=None):
+                         base_options=None, te_quant_info=None,
+                         quant_metadata=None):
     """Build model_options for ComfyUI model loading.
 
     Parameters
@@ -167,17 +168,31 @@ def _build_model_options(quant_format, sd, metadata, kernel_backend="pytorch",
         Output from ``_detect_te_quantization``.  When present the relevant
         ``*_quantization_metadata`` keys are forwarded into model_options so
         that ComfyUI's ``te()`` factories can pick them up.
+    quant_metadata : dict | None
+        Output from ``_prepare_state_dict`` (third return value).
+        ``{"layers": {layer_name: {"format": ...}, ...}}``.
+        Used for efficient "auto" format detection and as a fallback
+        ``quantization_metadata`` in model_options.
     """
     model_options = dict(base_options) if base_options else {}
 
-    # Detect formats from already-processed state dict
+    # Detect formats from already-processed state dict / quant_metadata
     if quant_format == "auto":
-        from ..utils.safetensors_loader import detect_layer_quantization
-        quant = detect_layer_quantization(sd, prefix="")
-        has_int8 = any(
-            k.endswith(".weight") and sd[k].dtype == torch.int8
-            for k in sd if k.endswith(".weight")
-        )
+        if quant_metadata is not None:
+            # Use already-computed quant_metadata instead of re-scanning
+            layer_formats = {
+                conf.get("format")
+                for conf in quant_metadata.get("layers", {}).values()
+                if conf.get("format")
+            }
+            has_int8 = any(
+                fmt in ("int8", "int8_tensorwise") for fmt in layer_formats
+            )
+        else:
+            has_int8 = any(
+                k.endswith(".weight") and sd[k].dtype == torch.int8
+                for k in sd if k.endswith(".weight")
+            )
         if has_int8:
             _configure_int8_backend(kernel_backend)
     elif quant_format in ("int8", "int8_tensorwise"):
@@ -189,6 +204,13 @@ def _build_model_options(quant_format, sd, metadata, kernel_backend="pytorch",
                      "t5xxl_quantization_metadata", "quantization_metadata"):
             if key in te_quant_info:
                 model_options[key] = te_quant_info[key]
+
+    # Fallback: if quant_metadata was detected but no architecture-specific
+    # *_quantization_metadata was set, ensure model_options carries a general
+    # quantization_metadata so downstream ComfyUI APIs know this model is
+    # quantised.
+    if quant_metadata is not None and "quantization_metadata" not in model_options:
+        model_options["quantization_metadata"] = {"mixed_ops": True}
 
     # Attach UnifiedQuantOps for all quantized formats
     try:
@@ -243,10 +265,11 @@ class QuantizedModelLoader:
         sd, metadata = _load_safetensors(ckpt_path, low_memory=low_memory)
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
-        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
+        sd, metadata, qm = _prepare_state_dict(sd, metadata)
 
         # 3. Build model options using the already-loaded state dict
-        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend)
+        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend,
+                                             quant_metadata=qm)
 
         # Build model from state dict
         try:
@@ -329,10 +352,11 @@ class QuantizedUNETLoader:
         sd, metadata = _load_safetensors(unet_path, low_memory=low_memory)
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
-        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
+        sd, metadata, qm = _prepare_state_dict(sd, metadata)
 
         # 3. Build model options using the already-loaded state dict
-        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend)
+        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend,
+                                             quant_metadata=qm)
 
         # Build model from state dict
         model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
@@ -414,15 +438,16 @@ class QuantizedCLIPLoader:
         sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
-        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
+        sd, metadata, qm = _prepare_state_dict(sd, metadata)
 
         # 3. Detect text-encoder-specific quantization metadata
         te_quant_info = _detect_te_quantization(sd)
 
-        # 4. Build model options with te quant info forwarded
+        # 4. Build model options with te quant info and quant_metadata forwarded
         model_options = _build_model_options(
             quant_format, sd, metadata, kernel_backend,
             base_options=base_options, te_quant_info=te_quant_info,
+            quant_metadata=qm,
         )
 
         # Load text encoder using ComfyUI's API
@@ -521,18 +546,28 @@ class QuantizedDualCLIPLoader:
         sd2, metadata2 = _load_safetensors(clip_path2, low_memory=low_memory)
 
         # 2. Inject .comfy_quant tensors for both
-        sd1, metadata1, _qm1 = _prepare_state_dict(sd1, metadata1)
-        sd2, metadata2, _qm2 = _prepare_state_dict(sd2, metadata2)
+        sd1, metadata1, qm1 = _prepare_state_dict(sd1, metadata1)
+        sd2, metadata2, qm2 = _prepare_state_dict(sd2, metadata2)
 
         # 3. Detect text-encoder-specific quantization from both state dicts
         te_quant_info = {}
         for sd_i in (sd1, sd2):
             te_quant_info.update(_detect_te_quantization(sd_i))
 
-        # 4. Build model options with te quant info
+        # 4. Merge quant_metadata from both encoders
+        if qm1 and qm2:
+            merged_layers = {}
+            merged_layers.update(qm1.get("layers", {}))
+            merged_layers.update(qm2.get("layers", {}))
+            qm_merged = {"layers": merged_layers}
+        else:
+            qm_merged = qm1 or qm2
+
+        # 5. Build model options with te quant info and quant_metadata
         model_options = _build_model_options(
             quant_format, sd1, metadata1, kernel_backend,
             base_options=base_options, te_quant_info=te_quant_info,
+            quant_metadata=qm_merged,
         )
 
         # Load dual text encoders using ComfyUI's API
