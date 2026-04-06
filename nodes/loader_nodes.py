@@ -7,6 +7,7 @@ These nodes provide custom model loading with:
 - INT8, FP8, and BNB 4-bit variants
 """
 
+import json
 import logging
 import torch
 import folder_paths
@@ -41,16 +42,162 @@ def _load_safetensors(filepath, low_memory=True):
             with UnifiedSafetensorsLoader(filepath, low_memory=low_memory) as loader:
                 sd = {key: loader.get_tensor(key) for key in loader.keys()}
                 metadata = loader.metadata() or {}
+                print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
             return sd, metadata
         else:
             logging.info(f"Loading {filepath} with comfy.utils.load_torch_file (aimdo/dynamic VRAM will be active)")
-            return comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
+            sd, metadata = comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
+            print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
+            return sd, metadata
     else:
         logging.warning(
             "unifiedefficientloader not installed, falling back to comfy.utils.load_torch_file "
             "(aimdo/dynamic VRAM will be active). Install with: pip install unifiedefficientloader"
         )
-        return comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
+        sd, metadata = comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
+        print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
+        return sd, metadata
+
+
+def _prepare_state_dict(sd, metadata, model_prefix=""):
+    """Run our own convert_old_quants on the state dict so that every
+    quantised layer gets a ``.comfy_quant`` metadata tensor.
+
+    ComfyUI skips its ``convert_old_quants`` when ``custom_operations`` is
+    set in model_options (which is always the case for QuantOps loaders).
+    We must therefore do it ourselves before handing the state dict over.
+
+    Returns (sd, metadata, quant_metadata).
+    """
+    from ..utils.safetensors_loader import convert_old_quants
+    return convert_old_quants(sd, model_prefix=model_prefix, metadata=metadata)
+
+
+def _detect_te_quantization(state_dict):
+    """Detect text-encoder quantisation from state dict .comfy_quant keys.
+
+    Returns a dict with the model-specific quantization metadata keys that
+    ComfyUI's ``te()`` factory functions expect, e.g.::
+
+        {"llama_quantization_metadata": {"mixed_ops": True},
+         "dtype_llama": torch.bfloat16}
+
+    or::
+
+        {"t5_quantization_metadata": {"mixed_ops": True},
+         "dtype_t5": torch.bfloat16}
+
+    The keys mirror what ``comfy.text_encoders.hunyuan_video.llama_detect``
+    and ``comfy.text_encoders.sd3_clip.t5_xxl_detect`` produce.
+    """
+    from ..utils.safetensors_loader import detect_layer_quantization
+
+    out = {}
+
+    # --- llama / qwen style ---
+    llama_norm_keys = ["model.norm.weight", "model.layers.0.input_layernorm.weight"]
+    for norm_key in llama_norm_keys:
+        if norm_key in state_dict:
+            out["dtype_llama"] = state_dict[norm_key].dtype
+            break
+
+    llama_weight_names = [
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.linear_attn.in_proj_a.weight",
+    ]
+    is_llama = any(k in state_dict for k in llama_weight_names)
+    if is_llama:
+        quant = detect_layer_quantization(state_dict, prefix="")
+        if quant is not None:
+            out["llama_quantization_metadata"] = quant
+
+    # --- T5-XXL style ---
+    t5_key = "encoder.final_layer_norm.weight"
+    t5_key_old = "encoder.block.23.layer.1.DenseReluDense.wi_1.weight"
+    t5_key_old2 = "encoder.block.23.layer.1.DenseReluDense.wi.weight"
+    is_t5 = t5_key in state_dict or t5_key_old in state_dict or t5_key_old2 in state_dict
+    if is_t5:
+        if t5_key in state_dict:
+            out["dtype_t5"] = state_dict[t5_key].dtype
+        quant = detect_layer_quantization(state_dict, prefix="")
+        if quant is not None:
+            out["t5_quantization_metadata"] = quant
+
+    return out
+
+
+def _configure_int8_backend(kernel_backend):
+    """Set up INT8 kernel backend (triton or pytorch)."""
+    try:
+        import comfy_kitchen as ck
+        if kernel_backend == "triton":
+            ck.set_backend_priority(["triton", "cuda", "eager"])
+        else:
+            ck.set_backend_priority(["cuda", "eager", "triton"])
+        logging.debug(f"Configured backend priority for '{kernel_backend}'")
+    except ImportError:
+        try:
+            from ..quant_layouts.int8_layout import BlockWiseINT8Layout
+            BlockWiseINT8Layout.set_backend(kernel_backend)
+            logging.debug(f"Configured INT8 backend to '{kernel_backend}'")
+        except Exception as e:
+            if kernel_backend == "triton":
+                logging.warning(f"Failed to configure Triton backend: {e}")
+    except Exception as e:
+        logging.warning(f"Failed to configure comfy_kitchen backend: {e}")
+
+
+def _build_model_options(quant_format, sd, metadata, kernel_backend="pytorch",
+                         base_options=None, te_quant_info=None):
+    """Build model_options for ComfyUI model loading.
+
+    Parameters
+    ----------
+    quant_format : str
+        User-selected format ("auto", "int8", etc.).
+    sd : dict
+        Already-loaded state dict (*after* ``_prepare_state_dict``).
+    metadata : dict
+        File metadata from safetensors.
+    kernel_backend : str
+        "pytorch" or "triton".
+    base_options : dict | None
+        Extra options to include (e.g. initial_device).
+    te_quant_info : dict | None
+        Output from ``_detect_te_quantization``.  When present the relevant
+        ``*_quantization_metadata`` keys are forwarded into model_options so
+        that ComfyUI's ``te()`` factories can pick them up.
+    """
+    model_options = dict(base_options) if base_options else {}
+
+    # Detect formats from already-processed state dict
+    if quant_format == "auto":
+        from ..utils.safetensors_loader import detect_layer_quantization
+        quant = detect_layer_quantization(sd, prefix="")
+        has_int8 = any(
+            k.endswith(".weight") and sd[k].dtype == torch.int8
+            for k in sd if k.endswith(".weight")
+        )
+        if has_int8:
+            _configure_int8_backend(kernel_backend)
+    elif quant_format in ("int8", "int8_tensorwise"):
+        _configure_int8_backend(kernel_backend)
+
+    # Forward text-encoder quantization metadata into model_options
+    if te_quant_info:
+        for key in ("llama_quantization_metadata", "t5_quantization_metadata",
+                     "t5xxl_quantization_metadata", "quantization_metadata"):
+            if key in te_quant_info:
+                model_options[key] = te_quant_info[key]
+
+    # Attach UnifiedQuantOps for all quantized formats
+    try:
+        from ..unified_ops import UnifiedQuantOps
+        model_options["custom_operations"] = UnifiedQuantOps
+    except ImportError as e:
+        logging.warning(f"UnifiedQuantOps not available: {e}")
+
+    return model_options
 
 
 class QuantizedModelLoader:
@@ -89,50 +236,17 @@ class QuantizedModelLoader:
     ):
         """Load a checkpoint with the specified quantization format and kernel backend."""
 
-        # Set the kernel backend for INT8 blockwise layout (only affects blockwise)
-        if quant_format == "int8":
-            try:
-                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
-
-                BlockWiseINT8Layout.set_backend(kernel_backend)
-                logging.debug(
-                    f"QuantizedModelLoader: Configured INT8 backend to '{kernel_backend}'"
-                )
-            except Exception as e:
-                if kernel_backend == "triton":
-                    logging.warning(f"Failed to configure Triton backend: {e}")
-
         # Get full checkpoint path
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
 
-        # Select ops class based on quant_format
-        model_options = {}
-        if quant_format != "auto":
-            try:
-                from ..unified_ops import UnifiedQuantOps
-                model_options = {"custom_operations": UnifiedQuantOps}
-                logging.info(
-                    f"QuantizedModelLoader: Using UnifiedQuantOps for {quant_format} models"
-                )
-            except ImportError as e:
-                logging.warning(f"UnifiedQuantOps not available: {e}")
-
-        # Load state dict
-        if quant_format == "auto":
-            # Auto mode: fast header-only detection, then standard loading
-            try:
-                from ..utils.safetensors_loader import detect_quant_format
-                detected_format = detect_quant_format(ckpt_path)
-                logging.info(f"QuantizedModelLoader: Auto-detected format: {detected_format}")
-
-                # Unconditionally use UnifiedQuantOps so we handle mixed formats perfectly
-                from ..unified_ops import UnifiedQuantOps
-                model_options = {"custom_operations": UnifiedQuantOps}
-            except Exception as e:
-                logging.warning(f"QuantizedModelLoader: Format detection failed: {e}")
-
-        # Load safetensors directly, bypassing aimdo/dynamic VRAM
+        # 1. Load safetensors FIRST so we have sd + metadata for detection
         sd, metadata = _load_safetensors(ckpt_path, low_memory=low_memory)
+
+        # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
+        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
+
+        # 3. Build model options using the already-loaded state dict
+        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend)
 
         # Build model from state dict
         try:
@@ -208,48 +322,17 @@ class QuantizedUNETLoader:
     def load_unet(self, unet_name, quant_format, kernel_backend, disable_dynamic, low_memory):
         """Load a UNET model with the specified settings."""
 
-        # Set kernel backend (only for INT8 blockwise format)
-        if quant_format == "int8":
-            try:
-                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
-
-                BlockWiseINT8Layout.set_backend(kernel_backend)
-                logging.debug(
-                    f"QuantizedUNETLoader: Configured INT8 backend to '{kernel_backend}'"
-                )
-            except Exception as e:
-                if kernel_backend == "triton":
-                    logging.warning(f"Failed to configure Triton backend: {e}")
-
         # Get model path
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
 
-        # Select ops class based on quant_format
-        model_options = {}
-        if quant_format != "auto":
-            try:
-                from ..unified_ops import UnifiedQuantOps
-                model_options = {"custom_operations": UnifiedQuantOps}
-                logging.info(f"QuantizedUNETLoader: Using UnifiedQuantOps for {quant_format} models")
-            except ImportError as e:
-                logging.warning(f"UnifiedQuantOps not available: {e}")
-
-        # Load state dict
-        if quant_format == "auto":
-            # Auto mode: fast header-only detection, then standard loading
-            try:
-                from ..utils.safetensors_loader import detect_quant_format
-                detected_format = detect_quant_format(unet_path)
-                logging.info(f"QuantizedUNETLoader: Auto-detected format: {detected_format}")
-
-                # Unconditionally use UnifiedQuantOps so we handle mixed formats perfectly
-                from ..unified_ops import UnifiedQuantOps
-                model_options = {"custom_operations": UnifiedQuantOps}
-            except Exception as e:
-                logging.warning(f"QuantizedUNETLoader: Format detection failed: {e}")
-
-        # Load safetensors directly, bypassing aimdo/dynamic VRAM
+        # 1. Load safetensors FIRST
         sd, metadata = _load_safetensors(unet_path, low_memory=low_memory)
+
+        # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
+        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
+
+        # 3. Build model options using the already-loaded state dict
+        model_options = _build_model_options(quant_format, sd, metadata, kernel_backend)
 
         # Build model from state dict
         model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
@@ -315,19 +398,6 @@ class QuantizedCLIPLoader:
         """Load a CLIP/text encoder with quantization support."""
         import comfy.model_management
 
-        # Configure INT8 kernel backend (only affects INT8 blockwise models)
-        if quant_format == "int8":
-            try:
-                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
-
-                BlockWiseINT8Layout.set_backend(kernel_backend)
-                logging.debug(
-                    f"QuantizedCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
-                )
-            except Exception as e:
-                if kernel_backend == "triton":
-                    logging.warning(f"Failed to configure Triton backend: {e}")
-
         # Get clip path
         clip_path = folder_paths.get_full_path("text_encoders", clip_name)
 
@@ -336,40 +406,24 @@ class QuantizedCLIPLoader:
             comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
         )
 
-        # Set up model options
-        model_options = {
+        base_options = {
             "initial_device": comfy.model_management.text_encoder_offload_device()
         }
 
-        # Load state dict based on format
-        if quant_format == "auto":
-            # Auto mode: fast header-only detection, then standard loading
-            try:
-                from ..utils.safetensors_loader import detect_quant_format
-                detected_format = detect_quant_format(clip_path)
-                logging.info(f"QuantizedCLIPLoader: Auto-detected format: {detected_format}")
+        # 1. Load safetensors FIRST
+        sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
 
-                # Select ops based on detected format
-                if detected_format == "int8_tensorwise":
-                    pass # Handled natively by ComfyUI
-                else:
-                    from ..unified_ops import UnifiedQuantOps
-                    model_options["custom_operations"] = UnifiedQuantOps
-            except Exception as e:
-                logging.warning(f"QuantizedCLIPLoader: Format detection failed: {e}")
+        # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
+        sd, metadata, _qm = _prepare_state_dict(sd, metadata)
 
-            # Load safetensors directly, bypassing aimdo/dynamic VRAM
-            sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
-        else:
-            # Explicit format: load safetensors directly, bypassing aimdo/dynamic VRAM
-            sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
+        # 3. Detect text-encoder-specific quantization metadata
+        te_quant_info = _detect_te_quantization(sd)
 
-            try:
-                from ..unified_ops import UnifiedQuantOps
-                model_options["custom_operations"] = UnifiedQuantOps
-                logging.info(f"QuantizedCLIPLoader: Using UnifiedQuantOps for {quant_format}")
-            except ImportError as e:
-                logging.warning(f"UnifiedQuantOps not available: {e}")
+        # 4. Build model options with te quant info forwarded
+        model_options = _build_model_options(
+            quant_format, sd, metadata, kernel_backend,
+            base_options=base_options, te_quant_info=te_quant_info,
+        )
 
         # Load text encoder using ComfyUI's API
         clip = comfy.sd.load_text_encoder_state_dicts(
@@ -444,19 +498,6 @@ class QuantizedDualCLIPLoader:
         """Load two text encoders with quantization support."""
         import comfy.model_management
 
-        # Configure INT8 kernel backend (only affects INT8 blockwise models)
-        if quant_format == "int8":
-            try:
-                from ..quant_layouts.int8_layout import BlockWiseINT8Layout
-
-                BlockWiseINT8Layout.set_backend(kernel_backend)
-                logging.debug(
-                    f"QuantizedDualCLIPLoader: Configured INT8 backend to '{kernel_backend}'"
-                )
-            except Exception as e:
-                if kernel_backend == "triton":
-                    logging.warning(f"Failed to configure Triton backend: {e}")
-
         # Resolve paths
         clip_path1 = folder_paths.get_full_path("text_encoders", text_encoder1)
 
@@ -471,41 +512,28 @@ class QuantizedDualCLIPLoader:
             comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION
         )
 
-        # Set up model options
-        model_options = {
+        base_options = {
             "initial_device": comfy.model_management.text_encoder_offload_device()
         }
 
-        # Load both state dicts directly, bypassing aimdo/dynamic VRAM
+        # 1. Load both state dicts FIRST
         sd1, metadata1 = _load_safetensors(clip_path1, low_memory=low_memory)
         sd2, metadata2 = _load_safetensors(clip_path2, low_memory=low_memory)
 
-        # Set ops based on quant_format
-        if quant_format == "auto":
-            try:
-                from ..utils.safetensors_loader import detect_quant_format
-                # Detect from first encoder (primary); second may differ
-                detected_format = detect_quant_format(clip_path1)
-                logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder1): {detected_format}")
+        # 2. Inject .comfy_quant tensors for both
+        sd1, metadata1, _qm1 = _prepare_state_dict(sd1, metadata1)
+        sd2, metadata2, _qm2 = _prepare_state_dict(sd2, metadata2)
 
-                from ..unified_ops import UnifiedQuantOps
-                model_options["custom_operations"] = UnifiedQuantOps
+        # 3. Detect text-encoder-specific quantization from both state dicts
+        te_quant_info = {}
+        for sd_i in (sd1, sd2):
+            te_quant_info.update(_detect_te_quantization(sd_i))
 
-                # Also check second encoder if first didn't set ops
-                if "custom_operations" not in model_options:
-                    detected_format2 = detect_quant_format(clip_path2)
-                    logging.info(f"QuantizedDualCLIPLoader: Auto-detected format (encoder2): {detected_format2}")
-                    from ..unified_ops import UnifiedQuantOps
-                    model_options["custom_operations"] = UnifiedQuantOps
-            except Exception as e:
-                logging.warning(f"QuantizedDualCLIPLoader: Format detection failed: {e}")
-        else:
-            try:
-                from ..unified_ops import UnifiedQuantOps
-                model_options["custom_operations"] = UnifiedQuantOps
-                logging.info(f"QuantizedDualCLIPLoader: Using UnifiedQuantOps for {quant_format}")
-            except ImportError as e:
-                logging.warning(f"UnifiedQuantOps not available: {e}")
+        # 4. Build model options with te quant info
+        model_options = _build_model_options(
+            quant_format, sd1, metadata1, kernel_backend,
+            base_options=base_options, te_quant_info=te_quant_info,
+        )
 
         # Load dual text encoders using ComfyUI's API
         clip = comfy.sd.load_text_encoder_state_dicts(

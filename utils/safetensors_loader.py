@@ -1,464 +1,250 @@
-"""
-Safetensors loader utilities for QuantOps.
-
-Provides memory-efficient loading of safetensors files with guaranteed
-float32 scale conversion for comfy_kitchen compatibility.
-
-Uses UnifiedSafetensorsLoader from unifiedefficientloader when available,
-with a bundled fallback implementation.
-"""
-
-import mmap
 import json
-import torch
-import struct
-import re
 import logging
-from typing import Dict, Any, Optional, Tuple
+import torch
+from typing import Optional, Dict, Any, Tuple
 
-logger = logging.getLogger(__name__)
-
-# Try to import UnifiedSafetensorsLoader for aimdo-free loading
 try:
-    from unifiedefficientloader import UnifiedSafetensorsLoader as _UnifiedLoader
-    from unifiedefficientloader import tensor_to_dict
+    from unifiedefficientloader import UnifiedSafetensorsLoader, tensor_to_dict
     _UNIFIED_LOADER_AVAILABLE = True
 except ImportError:
     _UNIFIED_LOADER_AVAILABLE = False
+    tensor_to_dict = None
 
-    def tensor_to_dict(tensor_data: torch.Tensor) -> dict:
-        """Convert uint8 tensor to dictionary (fallback)."""
-        byte_data = bytes(tensor_data.tolist())
-        json_str = byte_data.decode("utf-8")
-        return json.loads(json_str)
+logger = logging.getLogger(__name__)
 
 
-if _UNIFIED_LOADER_AVAILABLE:
+def detect_layer_quantization(state_dict, prefix=""):
+    """Check if state_dict contains .comfy_quant metadata tensors under the given prefix.
 
-    class MemoryEfficientSafeOpen(_UnifiedLoader):
-        """Compat wrapper over UnifiedSafetensorsLoader.
+    Mirrors comfy.utils.detect_layer_quantization but lives here so QuantOps
+    never needs to import the helper at runtime (the user asked us to avoid
+    calling ComfyUI helpers directly).
 
-        Provides .header/.header_size attributes and .get_tensor_as_dict()
-        for backward compatibility with internal callers, while delegating
-        all tensor loading to UnifiedSafetensorsLoader.
-        """
-
-        def __init__(self, filename: str, device: str = "cpu", mmap_mode: bool = False):
-            # low_memory=True → streaming mode (on-demand tensor reads, like the original)
-            super().__init__(filename, low_memory=True)
-            self.device = device
-
-        @property
-        def header(self):
-            """Public access to the parsed safetensors header dict."""
-            return self._header
-
-        @property
-        def header_size(self):
-            """Size of the safetensors header in bytes."""
-            return self._header_size
-
-        def get_tensor_as_dict(self, key: str) -> dict:
-            """Get a uint8 tensor and convert it to a dictionary."""
-            metadata = self._header[key]
-            if metadata["dtype"] != "U8":
-                raise ValueError(
-                    f"Tensor '{key}' has dtype {metadata['dtype']}, expected U8 (uint8)"
-                )
-            tensor = self.get_tensor(key)
-            return tensor_to_dict(tensor)
-
-    logger.debug("QuantOps: Using UnifiedSafetensorsLoader from unifiedefficientloader")
-
-else:
-
-    class MemoryEfficientSafeOpen:
-        """Memory-efficient safetensors file reader (bundled fallback)."""
-
-        def __init__(self, filename: str, device: str = "cpu", mmap_mode: bool = False):
-            self.filename = filename
-            self.device = device
-            self.mmap_mode = mmap_mode
-            self.header, self.header_size = self._read_header()
-            self.file = open(filename, "rb")
-            self.mmap_obj = None
-
-            if self.mmap_mode:
-                self.mmap_obj = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            if self.mmap_obj:
-                self.mmap_obj.close()
-            self.file.close()
-
-        def keys(self):
-            return [k for k in self.header.keys() if k != "__metadata__"]
-
-        def get_tensor(self, key: str) -> torch.Tensor:
-            if key not in self.header:
-                raise KeyError(f"Tensor '{key}' not found in the file")
-
-            metadata = self.header[key]
-            offset_start, offset_end = metadata["data_offsets"]
-
-            if self.mmap_mode and self.mmap_obj:
-                if offset_start != offset_end:
-                    start = self.header_size + 8 + offset_start
-                    end = self.header_size + 8 + offset_end
-                    tensor_bytes = memoryview(self.mmap_obj)[start:end]
-                else:
-                    tensor_bytes = None
-            else:
-                tensor_bytes = None
-                if offset_start != offset_end:
-                    self.file.seek(self.header_size + 8 + offset_start)
-                    tensor_bytes = self.file.read(offset_end - offset_start)
-
-            return self._deserialize_tensor(tensor_bytes, metadata)
-
-        def get_tensor_as_dict(self, key: str) -> dict:
-            """Get a uint8 tensor and convert it to a dictionary."""
-            tensor = self.get_tensor(key)
-            metadata = self.header[key]
-
-            if metadata["dtype"] != "U8":
-                raise ValueError(f"Tensor '{key}' has dtype {metadata['dtype']}, expected U8 (uint8)")
-
-            return tensor_to_dict(tensor)
-
-        def _read_header(self) -> Tuple[dict, int]:
-            with open(self.filename, "rb") as f:
-                header_size = struct.unpack("<Q", f.read(8))[0]
-                header_json = f.read(header_size).decode("utf-8")
-            return json.loads(header_json), header_size
-
-        def _deserialize_tensor(self, tensor_bytes, metadata) -> torch.Tensor:
-            dtype_str = metadata["dtype"]
-            shape = metadata["shape"]
-            dtype = self._get_torch_dtype(dtype_str)
-
-            if tensor_bytes is None:
-                byte_tensor = torch.empty(0, dtype=torch.uint8)
-            else:
-                byte_tensor = torch.frombuffer(tensor_bytes, dtype=torch.uint8)
-
-            if dtype_str in ["F8_E5M2", "F8_E4M3"]:
-                return self._convert_float8(byte_tensor, dtype_str, shape)
-
-            return byte_tensor.view(dtype).reshape(shape)
-
-        @staticmethod
-        def _get_torch_dtype(dtype_str: str) -> torch.dtype:
-            dtype_map = {
-                "F64": torch.float64,
-                "F32": torch.float32,
-                "F16": torch.float16,
-                "BF16": torch.bfloat16,
-                "I64": torch.int64,
-                "I32": torch.int32,
-                "I16": torch.int16,
-                "I8": torch.int8,
-                "U8": torch.uint8,
-                "BOOL": torch.bool,
-            }
-            if hasattr(torch, "float8_e5m2"):
-                dtype_map["F8_E5M2"] = torch.float8_e5m2
-            if hasattr(torch, "float8_e4m3fn"):
-                dtype_map["F8_E4M3"] = torch.float8_e4m3fn
-
-            dtype = dtype_map.get(dtype_str)
-            if dtype is None:
-                raise ValueError(f"Unsupported dtype: {dtype_str}")
-            return dtype
-
-        @staticmethod
-        def _convert_float8(byte_tensor, dtype_str: str, shape) -> torch.Tensor:
-            if dtype_str == "F8_E5M2" and hasattr(torch, "float8_e5m2"):
-                return byte_tensor.view(torch.float8_e5m2).reshape(shape)
-            elif dtype_str == "F8_E4M3" and hasattr(torch, "float8_e4m3fn"):
-                return byte_tensor.view(torch.float8_e4m3fn).reshape(shape)
-            else:
-                raise ValueError(f"Unsupported float8 type: {dtype_str}")
-
-    logger.debug("QuantOps: unifiedefficientloader not available, using bundled fallback loader")
-
-
-def load_quantized_state_dict(
-    filepath: str,
-    device: str = "cpu",
-    force_scale_float32: bool = True,
-) -> Tuple[Dict[str, torch.Tensor], str, Optional[dict]]:
+    Returns ``{"mixed_ops": True}`` when at least one key is found, else ``None``.
     """
-    Load a safetensors file with format detection.
-
-    Combines format detection and loading into a single efficient pass.
-
-    Args:
-        filepath: Path to safetensors file
-        device: Device to load tensors to
-        force_scale_float32: If True, convert all scale tensors to float32
-
-    Returns:
-        Tuple of (state_dict, detected_format, metadata)
-        - state_dict: Dict of tensors with scales guaranteed float32
-        - detected_format: Detected quantization format string
-        - metadata: File metadata if present
-    """
-    state_dict = {}
-    metadata = None
-    detected_format = "unknown"
-
-    with MemoryEfficientSafeOpen(filepath, device=device) as f:
-        # Get metadata if present
-        if "__metadata__" in f.header:
-            metadata = f.header["__metadata__"]
-
-            # Try to detect format from global metadata
-            quant_meta_str = metadata.get("_quantization_metadata")
-            if quant_meta_str:
-                try:
-                    quant_meta = json.loads(quant_meta_str)
-                    algo = quant_meta.get("algorithm", "").lower()
-                    if algo in ("int8_tensorwise", "int8_tw", "w8a8"):
-                        detected_format = "int8_tensorwise"
-                    elif algo in ("int8_blockwise", "int8_bw", "int8"):
-                        detected_format = "int8_blockwise"
-                    elif algo in ("fp8_e4m3", "float8_e4m3fn", "fp8"):
-                        detected_format = "float8_e4m3fn"
-                    elif algo in ("fp8_blockwise", "float8_e4m3fn_blockwise"):
-                        detected_format = "float8_e4m3fn_blockwise"
-                    elif algo in ("fp8_rowwise", "float8_e4m3fn_rowwise"):
-                        detected_format = "float8_e4m3fn_rowwise"
-                    elif algo in ("mxfp8",):
-                        detected_format = "mxfp8"
-                    elif algo in ("nvfp4",):
-                        detected_format = "nvfp4"
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-        keys = f.keys()
-
-        # If not detected from global metadata, try per-layer comfy_quant
-        if detected_format == "unknown":
-            comfy_quant_keys = [k for k in keys if k.endswith("comfy_quant")]
-            if comfy_quant_keys:
-                try:
-                    layer_meta = f.get_tensor_as_dict(comfy_quant_keys[0])
-                    fmt = layer_meta.get("format", "")
-                    if "tensorwise" in fmt or "tw" in fmt:
-                        detected_format = "int8_tensorwise"
-                    elif "blockwise" in fmt or "bw" in fmt:
-                        if "int8" in fmt:
-                            detected_format = "int8_blockwise"
-                        elif "fp8" in fmt or "float8" in fmt:
-                            detected_format = "float8_e4m3fn_blockwise"
-                except (ValueError, json.JSONDecodeError):
-                    pass
-
-        # Fallback: check weight dtype and scale shape
-        if detected_format == "unknown":
-            weight_keys = [k for k in keys if k.endswith(".weight")]
-            scale_keys = [k for k in keys if "weight_scale" in k or "scale_weight" in k]
-
-            if weight_keys:
-                first_weight_meta = f.header.get(weight_keys[0], {})
-                dtype = first_weight_meta.get("dtype", "")
-
-                if dtype == "I8":
-                    if scale_keys:
-                        scale_meta = f.header.get(scale_keys[0], {})
-                        scale_shape = scale_meta.get("shape", [])
-                        # Scalar or 1-element = tensorwise, 2D = blockwise
-                        if not scale_shape or (len(scale_shape) == 1 and scale_shape[0] == 1):
-                            detected_format = "int8_tensorwise"
-                        else:
-                            detected_format = "int8_blockwise"
-                    else:
-                        detected_format = "int8_tensorwise"
-                elif dtype in ("F8_E4M3", "F8_E5M2"):
-                    detected_format = "float8_e4m3fn"
-
-        # Load all tensors
-        for key in keys:
-            tensor = f.get_tensor(key)
-
-            # Check if this is a scale tensor that needs float32 conversion
-            if force_scale_float32 and _is_scale_tensor(key):
-                if tensor.dtype in (torch.float16, torch.bfloat16):
-                    tensor = tensor.to(torch.float32)
-
-            state_dict[key] = tensor
-
-    return state_dict, detected_format, metadata
-
-
-# Legacy alias for backwards compatibility
-def load_fp8_state_dict(
-    filepath: str,
-    device: str = "cpu",
-    force_scale_float32: bool = True,
-) -> Tuple[Dict[str, torch.Tensor], Optional[dict]]:
-    """Legacy function - use load_quantized_state_dict instead."""
-    sd, _, metadata = load_quantized_state_dict(filepath, device, force_scale_float32)
-    return sd, metadata
-
-
-def _is_scale_tensor(key: str) -> bool:
-    """Check if a tensor key is a scale parameter."""
-    scale_patterns = [
-        "weight_scale",
-        "scale_weight",
-        "input_scale",
-        "scale_input",
-        "weight_scale_2",  # NVFP4 tensor scale
-    ]
-    return any(pattern in key for pattern in scale_patterns)
-
-
-def get_layer_metadata(
-    filepath: str,
-    layer_prefix: str,
-) -> Optional[dict]:
-    """
-    Get comfy_quant metadata for a specific layer.
-
-    Args:
-        filepath: Path to safetensors file
-        layer_prefix: Layer prefix (e.g., "model.layers.0.attn.qkv.")
-
-    Returns:
-        Dict with layer metadata or None if not found
-    """
-    comfy_quant_key = f"{layer_prefix}comfy_quant"
-
-    with MemoryEfficientSafeOpen(filepath, device="cpu") as f:
-        if comfy_quant_key in f.keys():
-            try:
-                return f.get_tensor_as_dict(comfy_quant_key)
-            except (ValueError, json.JSONDecodeError):
-                pass
+    for k in state_dict:
+        if k.startswith(prefix) and k.endswith(".comfy_quant"):
+            return {"mixed_ops": True}
     return None
 
 
-def get_quantization_metadata(filepath: str) -> Optional[dict]:
+def convert_old_quants(state_dict, model_prefix="", metadata=None):
+    """Process state_dict + file metadata so every quantised layer gets a
+    ``.comfy_quant`` uint8 tensor describing its format.
+
+    This is our own re-implementation of ``comfy.utils.convert_old_quants``.
+    ComfyUI skips its version when ``custom_operations`` is set in
+    ``model_options`` (which is always the case for QuantOps), so we must
+    run it ourselves *before* handing the state_dict to ComfyUI.
+
+    The function handles three scenarios:
+
+    1. ``_quantization_metadata`` present in file metadata → parse JSON,
+       inject ``.comfy_quant`` tensors.
+    2. Legacy ``scaled_fp8`` sentinel key → rename ``scale_weight`` →
+       ``weight_scale``, build per-layer config, inject ``.comfy_quant``.
+    3. Neither present → do nothing (model may already contain
+       ``.comfy_quant`` keys from ``--comfy_quant`` export, or is
+       unquantised).
+
+    Returns
+    -------
+    state_dict : dict
+        Possibly modified in-place.
+    metadata : dict
+        The (unchanged) metadata.
+    quant_metadata : dict | None
+        ``{"layers": {prefix: {config}, ...}}`` when quantisation was
+        detected, else ``None``.
     """
-    Read _quantization_metadata from safetensors header without loading tensors.
+    if metadata is None:
+        metadata = {}
 
-    Args:
-        filepath: Path to safetensors file
+    quant_metadata = None
 
-    Returns:
-        Dict with quantization metadata or None if not found
+    if "_quantization_metadata" not in metadata:
+        # --- Legacy scaled-FP8 format ---
+        scaled_fp8_key = "{}scaled_fp8".format(model_prefix)
+
+        if scaled_fp8_key in state_dict:
+            scaled_fp8_weight = state_dict[scaled_fp8_key]
+            scaled_fp8_dtype = scaled_fp8_weight.dtype
+            if scaled_fp8_dtype == torch.float32:
+                scaled_fp8_dtype = torch.float8_e4m3fn
+
+            full_precision_matrix_mult = scaled_fp8_weight.nelement() == 2
+
+            out_sd = {}
+            layers = {}
+            for k in list(state_dict.keys()):
+                if k == scaled_fp8_key:
+                    continue
+                if not k.startswith(model_prefix):
+                    out_sd[k] = state_dict[k]
+                    continue
+
+                k_out = k
+                w = state_dict.pop(k)
+                layer = None
+
+                if k_out.endswith(".scale_weight"):
+                    layer = k_out[: -len(".scale_weight")]
+                    k_out = "{}.weight_scale".format(layer)
+
+                if layer is not None:
+                    layer_conf = {"format": "float8_e4m3fn"}
+                    if full_precision_matrix_mult:
+                        layer_conf["full_precision_matrix_mult"] = full_precision_matrix_mult
+                    layers[layer] = layer_conf
+
+                if k_out.endswith(".scale_input"):
+                    layer = k_out[: -len(".scale_input")]
+                    k_out = "{}.input_scale".format(layer)
+                    if w.item() == 1.0:
+                        continue
+
+                out_sd[k_out] = w
+
+            state_dict = out_sd
+            quant_metadata = {"layers": layers}
+    else:
+        quant_metadata = json.loads(metadata["_quantization_metadata"])
+
+    # Inject .comfy_quant tensors so that _load_from_state_dict can read
+    # per-layer config regardless of how the model was exported.
+    if quant_metadata is not None:
+        layers = quant_metadata.get("layers", {})
+        for k, v in layers.items():
+            comfy_quant_key = "{}.comfy_quant".format(k)
+            state_dict[comfy_quant_key] = torch.tensor(
+                list(json.dumps(v).encode("utf-8")), dtype=torch.uint8
+            )
+
+    return state_dict, metadata, quant_metadata
+
+
+def _is_scale_tensor(key: str) -> bool:
+    """Helper to detect tensors containing scales."""
+    return (
+        key.endswith(".weight_scale")
+        or key.endswith(".weight_scale_2")
+        or key.endswith(".scale_weight")
+    )
+
+
+def extract_quantization_metadata(filepath: str) -> Optional[Dict[str, Any]]:
     """
-    try:
-        # Only read header, not tensors
-        with open(filepath, "rb") as f:
-            header_size = struct.unpack("<Q", f.read(8))[0]
-            header_json = f.read(header_size).decode("utf-8")
+    Extract quantization metadata from a safetensors file WITHOUT loading
+    the full state dict.  Used only for lightweight pre-detection (e.g.
+    the 'auto' format option).
 
-        header = json.loads(header_json)
-        metadata = header.get("__metadata__", {})
-
-        # Look for _quantization_metadata (stored as JSON string)
-        quant_meta_str = metadata.get("_quantization_metadata")
-        if quant_meta_str:
-            return json.loads(quant_meta_str)
-
+    Returns a dict with a 'layers' key where each layer maps to its config
+    e.g., {"layers": {"prefix": {"format": "float8_e4m3fn"}, ...}}
+    The 'format' values are QUANT_ALGOS keys.
+    Returns a dict with an 'inferred_format' if no explicit metadata is found
+    but scale tensors are present.
+    Returns None if no quantization is found.
+    """
+    if not _UNIFIED_LOADER_AVAILABLE:
+        logger.warning("UnifiedSafetensorsLoader not available, cannot extract quantization metadata")
         return None
-    except Exception:
+
+    try:
+        with UnifiedSafetensorsLoader(filepath, low_memory=True) as loader:
+            # 1. Check __metadata__ for _quantization_metadata
+            file_metadata = loader.metadata() or {}
+            quant_meta_str = file_metadata.get("_quantization_metadata")
+
+            if quant_meta_str:
+                try:
+                    return json.loads(quant_meta_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"Failed to decode _quantization_metadata in {filepath}: {e}"
+                    )
+
+            # 2. Scan for .comfy_quant U8 keys
+            all_keys = loader.keys()
+            comfy_quant_keys = [k for k in all_keys if k.endswith(".comfy_quant")]
+
+            if comfy_quant_keys:
+                layers = {}
+                for key in comfy_quant_keys:
+                    layer_prefix = key[: -len(".comfy_quant")]
+                    try:
+                        tensor = loader.get_tensor(key)
+                        layer_conf = tensor_to_dict(tensor)
+                        layers[layer_prefix] = layer_conf
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to load or parse comfy_quant tensor {key}: {e}"
+                        )
+
+                if layers:
+                    return {"layers": layers}
+
+            # 3. Check for scale tensors indicating quantization without metadata
+            for key in all_keys:
+                if _is_scale_tensor(key):
+                    # Found a scale, determine format from the weight dtype
+                    if key.endswith(".weight_scale"):
+                        weight_key = key[: -len(".weight_scale")] + ".weight"
+                    elif key.endswith(".weight_scale_2"):
+                        weight_key = key[: -len(".weight_scale_2")] + ".weight"
+                    else:  # .scale_weight (old fp8_scaled format)
+                        weight_key = key[: -len(".scale_weight")] + ".weight"
+
+                    if weight_key in all_keys:
+                        if hasattr(loader, "_header") and weight_key in loader._header:
+                            dtype_str = loader._header[weight_key].get("dtype", "")
+                            if dtype_str == "I8":
+                                return {"inferred_format": "int8"}
+                            elif dtype_str in ["F8_E4M3", "F8_E5M2"]:
+                                return {"inferred_format": "float8_e4m3fn"}
+                            elif dtype_str == "U8":
+                                return {"inferred_format": "nvfp4"}
+
+                    # Fallback if weight not found or dtype not recognized
+                    return {"inferred_format": "int8"}
+
+            return None
+
+    except Exception as e:
+        logger.error(
+            f"Error extracting quantization metadata from {filepath}: {e}"
+        )
         return None
 
 
 def detect_quant_format(filepath: str) -> str:
     """
-    Detect quantization format from safetensors file metadata.
+    Detect the primary quantization format of a safetensors file.
 
-    Checks:
-    1. Global _quantization_metadata in __metadata__
-    2. First comfy_quant tensor if exists
-    3. Weight dtypes as fallback
-
-    Args:
-        filepath: Path to safetensors file
-
-    Returns:
-        Detected format string: "int8_tensorwise", "int8_blockwise",
-        "float8_e4m3fn", "float8_e4m3fn_blockwise", etc.
-        Returns "unknown" if format cannot be detected.
+    Returns a string representing the format (e.g., 'float8_e4m3fn', 'int8_tensorwise', 'mixed').
+    Returns 'unknown' if no quantization is detected.
     """
-    # Try global metadata first (fastest, header-only)
-    quant_meta = get_quantization_metadata(filepath)
-    if quant_meta:
-        algo = quant_meta.get("algorithm", "").lower()
-        # Map algorithm names to our format strings
-        if algo in ("int8_tensorwise", "int8_tw", "w8a8"):
-            return "int8_tensorwise"
-        elif algo in ("int8_blockwise", "int8_bw", "int8"):
-            return "int8_blockwise"
-        elif algo in ("fp8_e4m3", "float8_e4m3fn", "fp8"):
-            return "float8_e4m3fn"
-        elif algo in ("fp8_blockwise", "float8_e4m3fn_blockwise"):
-            return "float8_e4m3fn_blockwise"
-        elif algo in ("fp8_rowwise", "float8_e4m3fn_rowwise"):
-            return "float8_e4m3fn_rowwise"
-        elif algo in ("mxfp8",):
-            return "mxfp8"
-        elif algo in ("nvfp4",):
-            return "nvfp4"
+    meta = extract_quantization_metadata(filepath)
+    if not meta:
+        return "unknown"
 
-    # Try reading per-layer comfy_quant metadata
-    try:
-        with MemoryEfficientSafeOpen(filepath, device="cpu") as f:
-            keys = f.keys()
+    if "inferred_format" in meta:
+        return meta["inferred_format"]
 
-            # Look for comfy_quant tensors
-            comfy_quant_keys = [k for k in keys if k.endswith("comfy_quant")]
-            if comfy_quant_keys:
-                try:
-                    layer_meta = f.get_tensor_as_dict(comfy_quant_keys[0])
-                    fmt = layer_meta.get("format", "")
-                    if "tensorwise" in fmt or "tw" in fmt:
-                        return "int8_tensorwise"
-                    elif "blockwise" in fmt or "bw" in fmt:
-                        if "int8" in fmt:
-                            return "int8_blockwise"
-                        elif "fp8" in fmt or "float8" in fmt:
-                            return "float8_e4m3fn_blockwise"
-                except (ValueError, json.JSONDecodeError):
-                    pass
+    layers = meta.get("layers", {})
+    if not layers:
+        return "unknown"
 
-            # Fallback: check weight dtype and look for scale patterns
-            weight_keys = [k for k in keys if k.endswith(".weight")]
-            scale_keys = [k for k in keys if "weight_scale" in k or "scale_weight" in k]
+    formats = set()
+    for layer_conf in layers.values():
+        fmt = layer_conf.get("format")
+        if fmt:
+            formats.add(fmt)
 
-            if weight_keys:
-                # Get first weight metadata
-                first_weight_meta = f.header.get(weight_keys[0], {})
-                dtype = first_weight_meta.get("dtype", "")
+    if not formats:
+        return "unknown"
 
-                if dtype == "I8":
-                    # Check if scale is scalar (tensorwise) or has shape (blockwise)
-                    if scale_keys:
-                        first_scale_key = scale_keys[0]
-                        scale_meta = f.header.get(first_scale_key, {})
-                        scale_shape = scale_meta.get("shape", [])
+    if len(formats) == 1:
+        return formats.pop()
 
-                        # Scalar or 1-element = tensorwise, 2D = blockwise
-                        if not scale_shape or (len(scale_shape) == 1 and scale_shape[0] == 1):
-                            return "int8_tensorwise"
-                        else:
-                            return "int8_blockwise"
-                    return "int8_tensorwise"  # Default for int8
-
-                elif dtype in ("F8_E4M3", "F8_E5M2"):
-                    return "float8_e4m3fn"
-
-    except Exception:
-        pass
-
-    return "unknown"
-
-
+    # Return mixed if multiple formats exist, unified_ops handles this.
+    return "mixed"
