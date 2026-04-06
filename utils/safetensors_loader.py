@@ -65,31 +65,81 @@ def detect_layer_quantization(state_dict, prefix=""):
     return None
 
 
+def _infer_layer_format(weight, scale, scale_2):
+    """Infer quantization format from a weight tensor's dtype and accompanying
+    scale tensor shapes.
+
+    Parameters
+    ----------
+    weight : torch.Tensor
+        The ``.weight`` tensor for a layer.
+    scale : torch.Tensor | None
+        The ``.weight_scale`` (or ``.scale_weight``) tensor, if present.
+    scale_2 : torch.Tensor | None
+        The ``.weight_scale_2`` tensor, if present (used by NVFP4).
+
+    Returns
+    -------
+    dict | None
+        A layer config dict (e.g. ``{"format": "int8_tensorwise"}``) when a
+        quantised pattern is recognised, otherwise ``None``.
+    """
+    # NVFP4: uint8 packed weights with a secondary scale
+    if weight.dtype == torch.uint8 and scale_2 is not None:
+        return {"format": "nvfp4"}
+
+    # INT8: int8 weight with a scale tensor
+    if weight.dtype == torch.int8 and scale is not None:
+        if scale.ndim == 0 or (scale.ndim == 1 and scale.numel() == 1):
+            return {"format": "int8_tensorwise"}
+        return {"format": "int8"}
+
+    # FP8: float8 weight with a scale tensor
+    if weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2) and scale is not None:
+        if scale.ndim == 0 or (scale.ndim == 1 and scale.numel() == 1):
+            return {"format": "float8_e4m3fn"}
+        if scale.ndim == 1 and scale.numel() == weight.shape[0]:
+            return {"format": "float8_e4m3fn_rowwise"}
+        if scale.ndim == 2:
+            return {"format": "float8_e4m3fn_blockwise"}
+        return {"format": "float8_e4m3fn"}
+
+    return None
+
+
 def convert_old_quants(state_dict, model_prefix="", metadata=None):
     """Process state_dict + file metadata so every quantised layer gets a
-    ``.comfy_quant`` uint8 tensor describing its format.
+    ``.comfy_quant`` uint8 tensor describing its format, and the returned
+    ``metadata`` dict contains ``_quantization_metadata`` as a JSON string.
 
     This is our own re-implementation of ``comfy.utils.convert_old_quants``.
     ComfyUI skips its version when ``custom_operations`` is set in
     ``model_options`` (which is always the case for QuantOps), so we must
     run it ourselves *before* handing the state_dict to ComfyUI.
 
-    The function handles three scenarios:
+    The function handles five scenarios in priority order:
 
     1. ``_quantization_metadata`` present in file metadata → parse JSON,
        inject ``.comfy_quant`` tensors.
     2. Legacy ``scaled_fp8`` sentinel key → rename ``scale_weight`` →
        ``weight_scale``, build per-layer config, inject ``.comfy_quant``.
-    3. Neither present → do nothing (model may already contain
-       ``.comfy_quant`` keys from ``--comfy_quant`` export, or is
-       unquantised).
+    3. Existing ``.comfy_quant`` tensors in the state dict (from
+       ``--comfy_quant`` export) → parse them to reconstruct the
+       ``quant_metadata`` dict.
+    4. Quantised weight dtype + scale patterns (int8, fp8, nvfp4) without
+       any explicit metadata → infer format, inject ``.comfy_quant``.
+    5. None of the above → model is unquantised, do nothing.
+
+    In all cases where quantisation is detected, ``metadata`` is updated
+    with ``metadata["_quantization_metadata"] = json.dumps(quant_metadata)``
+    so downstream ComfyUI APIs that receive the metadata dict can see it.
 
     Returns
     -------
     state_dict : dict
         Possibly modified in-place.
     metadata : dict
-        The (unchanged) metadata.
+        Updated with ``_quantization_metadata`` when quantisation detected.
     quant_metadata : dict | None
         ``{"layers": {prefix: {config}, ...}}`` when quantisation was
         detected, else ``None``.
@@ -100,7 +150,7 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
     quant_metadata = None
 
     if "_quantization_metadata" not in metadata:
-        # --- Legacy scaled-FP8 format ---
+        # --- Scenario 2: Legacy scaled-FP8 format ---
         scaled_fp8_key = "{}scaled_fp8".format(model_prefix)
 
         if scaled_fp8_key in state_dict:
@@ -144,18 +194,79 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
 
             state_dict = out_sd
             quant_metadata = {"layers": layers}
+
+        # --- Scenario 3: Reconstruct from existing .comfy_quant tensors ---
+        if quant_metadata is None:
+            existing_cq_keys = [
+                k for k in state_dict if k.endswith(".comfy_quant")
+            ]
+            if existing_cq_keys:
+                layers = {}
+                for cq_key in existing_cq_keys:
+                    layer_name = cq_key[: -len(".comfy_quant")]
+                    cq_tensor = state_dict[cq_key]
+                    try:
+                        layer_conf = json.loads(
+                            cq_tensor.numpy().tobytes().decode("utf-8")
+                        )
+                    except Exception:
+                        if tensor_to_dict is not None:
+                            try:
+                                layer_conf = tensor_to_dict(cq_tensor)
+                            except Exception:
+                                continue
+                        else:
+                            continue
+                    layers[layer_name] = layer_conf
+                if layers:
+                    quant_metadata = {"layers": layers}
+
+        # --- Scenario 4: Infer from weight dtype + scale patterns ---
+        if quant_metadata is None:
+            layers = {}
+            seen = set()
+            for k in list(state_dict.keys()):
+                if not k.endswith(".weight"):
+                    continue
+                layer_name = k[: -len(".weight")]
+                if layer_name in seen:
+                    continue
+                seen.add(layer_name)
+
+                weight = state_dict[k]
+                scale = (
+                    state_dict.get(layer_name + ".weight_scale")
+                    or state_dict.get(layer_name + ".scale_weight")
+                )
+                scale_2 = state_dict.get(layer_name + ".weight_scale_2")
+
+                layer_conf = _infer_layer_format(weight, scale, scale_2)
+                if layer_conf is not None:
+                    layers[layer_name] = layer_conf
+
+            if layers:
+                quant_metadata = {"layers": layers}
     else:
+        # --- Scenario 1: _quantization_metadata already in file metadata ---
         quant_metadata = json.loads(metadata["_quantization_metadata"])
 
     # Inject .comfy_quant tensors so that _load_from_state_dict can read
     # per-layer config regardless of how the model was exported.
+    # Skip keys that already exist (Scenario 3 preserves them).
     if quant_metadata is not None:
         layers = quant_metadata.get("layers", {})
-        for k, v in layers.items():
-            comfy_quant_key = "{}.comfy_quant".format(k)
-            state_dict[comfy_quant_key] = torch.tensor(
-                list(json.dumps(v).encode("utf-8")), dtype=torch.uint8
-            )
+        for layer_name, layer_conf in layers.items():
+            comfy_quant_key = "{}.comfy_quant".format(layer_name)
+            if comfy_quant_key not in state_dict:
+                state_dict[comfy_quant_key] = torch.tensor(
+                    list(json.dumps(layer_conf).encode("utf-8")),
+                    dtype=torch.uint8,
+                )
+
+        # Ensure metadata carries _quantization_metadata for downstream
+        # ComfyUI APIs (load_state_dict_guess_config, load_diffusion_model_state_dict, etc.)
+        if "_quantization_metadata" not in metadata:
+            metadata["_quantization_metadata"] = json.dumps(quant_metadata)
 
     return state_dict, metadata, quant_metadata
 
