@@ -30,7 +30,8 @@ except ImportError:
 def _load_safetensors(filepath, low_memory=True):
     """Load a safetensors file, bypassing comfy_aimdo/dynamic VRAM when possible.
 
-    Uses UnifiedSafetensorsLoader if available, otherwise falls back to
+    Uses async parallel I/O via UnifiedSafetensorsLoader.load_all() when
+    available and low_memory is True, otherwise falls back to
     comfy.utils.load_torch_file.
 
     Returns:
@@ -38,16 +39,13 @@ def _load_safetensors(filepath, low_memory=True):
     """
     if _UNIFIED_LOADER_AVAILABLE:
         if low_memory:
-            logging.info(f"Loading {filepath} with UnifiedSafetensorsLoader in low memory mode (fast, efficient, minimal VRAM impact)")
-            with UnifiedSafetensorsLoader(filepath, low_memory=low_memory) as loader:
-                sd = {key: loader.get_tensor(key) for key in loader.keys()}
-                metadata = loader.metadata() or {}
-                print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
+            logging.info(f"Loading {filepath} with async parallel I/O (fast, efficient, minimal VRAM impact)")
+            from ..utils.safetensors_loader import async_load_safetensors
+            sd, metadata = async_load_safetensors(filepath)
             return sd, metadata
         else:
             logging.info(f"Loading {filepath} with comfy.utils.load_torch_file (aimdo/dynamic VRAM will be active)")
             sd, metadata = comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
-            print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
             return sd, metadata
     else:
         logging.warning(
@@ -55,7 +53,6 @@ def _load_safetensors(filepath, low_memory=True):
             "(aimdo/dynamic VRAM will be active). Install with: pip install unifiedefficientloader"
         )
         sd, metadata = comfy.utils.load_torch_file(filepath, safe_load=True, return_metadata=True)
-        print(f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}")
         return sd, metadata
 
 

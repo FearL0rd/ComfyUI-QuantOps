@@ -13,6 +13,43 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def async_load_safetensors(filepath):
+    """Load all tensors and metadata from a safetensors file using async parallel I/O.
+
+    Uses UnifiedSafetensorsLoader.load_all() which streams tensors from disk
+    via a multi-threaded pool for parallel reads.
+
+    Requires ``unifiedefficientloader`` to be installed.
+
+    Returns
+    -------
+    state_dict : dict
+        All tensors keyed by name, on CPU.
+    metadata : dict
+        File-level metadata from the safetensors header.
+
+    Raises
+    ------
+    ImportError
+        If ``unifiedefficientloader`` is not installed.
+    """
+    if not _UNIFIED_LOADER_AVAILABLE:
+        raise ImportError(
+            "unifiedefficientloader is required for async_load_safetensors. "
+            "Install with: pip install unifiedefficientloader"
+        )
+
+    with UnifiedSafetensorsLoader(filepath, low_memory=True) as loader:
+        sd = loader.load_all()
+        metadata = loader.metadata() or {}
+
+    logger.info(
+        f"Async-loaded {filepath}: {len(sd)} tensors, "
+        f"{len(metadata)} metadata keys"
+    )
+    return sd, metadata
+
+
 def detect_layer_quantization(state_dict, prefix=""):
     """Check if state_dict contains .comfy_quant metadata tensors under the given prefix.
 
