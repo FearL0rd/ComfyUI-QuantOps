@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, Tuple
 
 try:
     from unifiedefficientloader import UnifiedSafetensorsLoader, tensor_to_dict
+
     _UNIFIED_LOADER_AVAILABLE = True
 except ImportError:
     _UNIFIED_LOADER_AVAILABLE = False
@@ -44,8 +45,7 @@ def async_load_safetensors(filepath):
         metadata = loader.metadata() or {}
 
     logger.info(
-        f"Async-loaded {filepath}: {len(sd)} tensors, "
-        f"{len(metadata)} metadata keys"
+        f"Async-loaded {filepath}: {len(sd)} tensors, " f"{len(metadata)} metadata keys"
     )
     return sd, metadata
 
@@ -181,7 +181,9 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
                 if layer is not None:
                     layer_conf = {"format": "float8_e4m3fn"}
                     if full_precision_matrix_mult:
-                        layer_conf["full_precision_matrix_mult"] = full_precision_matrix_mult
+                        layer_conf["full_precision_matrix_mult"] = (
+                            full_precision_matrix_mult
+                        )
                     layers[layer] = layer_conf
 
                 if k_out.endswith(".scale_input"):
@@ -197,18 +199,17 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
 
         # --- Scenario 3: Reconstruct from existing .comfy_quant tensors ---
         if quant_metadata is None:
-            existing_cq_keys = [
-                k for k in state_dict if k.endswith(".comfy_quant")
-            ]
+            existing_cq_keys = [k for k in state_dict if k.endswith(".comfy_quant")]
             if existing_cq_keys:
                 layers = {}
                 for cq_key in existing_cq_keys:
                     layer_name = cq_key[: -len(".comfy_quant")]
                     cq_tensor = state_dict[cq_key]
                     try:
-                        layer_conf = json.loads(
-                            cq_tensor.numpy().tobytes().decode("utf-8")
-                        )
+                        cq_str = cq_tensor.numpy().tobytes().decode("utf-8").strip()
+                        if cq_str.startswith("{{") and cq_str.endswith("}}"):
+                            cq_str = cq_str[1:-1]
+                        layer_conf = json.loads(cq_str)
                     except Exception:
                         if tensor_to_dict is not None:
                             try:
@@ -234,9 +235,8 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
                 seen.add(layer_name)
 
                 weight = state_dict[k]
-                scale = (
-                    state_dict.get(layer_name + ".weight_scale")
-                    or state_dict.get(layer_name + ".scale_weight")
+                scale = state_dict.get(layer_name + ".weight_scale") or state_dict.get(
+                    layer_name + ".scale_weight"
                 )
                 scale_2 = state_dict.get(layer_name + ".weight_scale_2")
 
@@ -248,7 +248,10 @@ def convert_old_quants(state_dict, model_prefix="", metadata=None):
                 quant_metadata = {"layers": layers}
     else:
         # --- Scenario 1: _quantization_metadata already in file metadata ---
-        quant_metadata = json.loads(metadata["_quantization_metadata"])
+        qm_str = metadata["_quantization_metadata"].strip()
+        if qm_str.startswith("{{") and qm_str.endswith("}}"):
+            qm_str = qm_str[1:-1]
+        quant_metadata = json.loads(qm_str)
 
     # Inject .comfy_quant tensors so that _load_from_state_dict can read
     # per-layer config regardless of how the model was exported.
@@ -294,7 +297,9 @@ def extract_quantization_metadata(filepath: str) -> Optional[Dict[str, Any]]:
     Returns None if no quantization is found.
     """
     if not _UNIFIED_LOADER_AVAILABLE:
-        logger.warning("UnifiedSafetensorsLoader not available, cannot extract quantization metadata")
+        logger.warning(
+            "UnifiedSafetensorsLoader not available, cannot extract quantization metadata"
+        )
         return None
 
     try:
@@ -305,6 +310,11 @@ def extract_quantization_metadata(filepath: str) -> Optional[Dict[str, Any]]:
 
             if quant_meta_str:
                 try:
+                    quant_meta_str = quant_meta_str.strip()
+                    if quant_meta_str.startswith("{{") and quant_meta_str.endswith(
+                        "}}"
+                    ):
+                        quant_meta_str = quant_meta_str[1:-1]
                     return json.loads(quant_meta_str)
                 except json.JSONDecodeError as e:
                     logger.warning(
@@ -358,9 +368,7 @@ def extract_quantization_metadata(filepath: str) -> Optional[Dict[str, Any]]:
             return None
 
     except Exception as e:
-        logger.error(
-            f"Error extracting quantization metadata from {filepath}: {e}"
-        )
+        logger.error(f"Error extracting quantization metadata from {filepath}: {e}")
         return None
 
 
