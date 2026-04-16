@@ -28,49 +28,87 @@ except ImportError:
     _UNIFIED_LOADER_AVAILABLE = False
 
 
-def _load_safetensors(filepath, low_memory=True):
-    """Load a safetensors file, bypassing comfy_aimdo/dynamic VRAM when possible.
+def _load_safetensors(filepath, low_memory=True, disable_dynamic=True):
+    """Load a safetensors file with a strategy determined by ``disable_dynamic``.
 
-    Uses async parallel I/O via UnifiedSafetensorsLoader.load_all() when
-    available and low_memory is True, otherwise falls back to
-    comfy.utils.load_torch_file.
+    Three distinct paths:
 
-    Returns:
-        Tuple of (state_dict, metadata)
+    1. ``disable_dynamic=False`` (dynamic VRAM requested):
+       Uses ``mmap_load_safetensors()`` which stamps each tensor storage with
+       ComfyUI's ``_comfy_tensor_file_slice`` / ``_comfy_tensor_mmap_refs`` /
+       ``_comfy_tensor_mmap_touched`` attributes.  This lets
+       ``ModelPatcherDynamic`` page weights in/out from disk on demand.
+       Falls back to ``async_load_safetensors()`` if mmap init fails.
+
+    2. ``disable_dynamic=True`` + ``low_memory=True`` (default):
+       Uses ``async_load_safetensors()`` -- parallel threaded I/O via
+       ``UnifiedSafetensorsLoader.load_all()``.  Fast, efficient CPU load.
+       ComfyUI dynamic VRAM is fully bypassed (``ModelPatcher`` used, no mmap).
+
+    3. ``disable_dynamic=True`` + ``low_memory=False``:
+       Falls through to ``comfy.utils.load_torch_file`` (aimdo path if active).
+
+    When ``unifiedefficientloader`` is not installed, all paths fall back to
+    ``comfy.utils.load_torch_file``.
+
+    Returns
+    -------
+    Tuple of (state_dict, metadata)
     """
     if _UNIFIED_LOADER_AVAILABLE:
-        if low_memory:
+        if not disable_dynamic:
+            # Dynamic VRAM path: mmap-backed tensors stamped with ComfyUI protocol
             logging.info(
-                f"Loading {filepath} with async parallel I/O (fast, efficient, minimal VRAM impact)"
+                f"Loading {filepath} with mmap (ComfyUI dynamic VRAM protocol)"
+            )
+            from ..utils.safetensors_loader import mmap_load_safetensors
+
+            sd, metadata = mmap_load_safetensors(filepath)
+            logging.debug(
+                f"Loaded state dict with keys: {list(sd.keys())[:10]}... "
+                f"and metadata keys: {list(metadata.keys())}"
+            )
+            return sd, metadata
+        elif low_memory:
+            # Static path: parallel threaded load_all(), full CPU tensors
+            logging.info(
+                f"Loading {filepath} with async parallel I/O "
+                f"(fast, efficient, minimal VRAM impact)"
             )
             from ..utils.safetensors_loader import async_load_safetensors
 
             sd, metadata = async_load_safetensors(filepath)
             logging.debug(
-                f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}"
+                f"Loaded state dict with keys: {list(sd.keys())[:10]}... "
+                f"and metadata keys: {list(metadata.keys())}"
             )
             return sd, metadata
         else:
+            # low_memory=False, disable_dynamic=True: let comfy handle it
             logging.info(
-                f"Loading {filepath} with comfy.utils.load_torch_file (aimdo/dynamic VRAM will be active)"
+                f"Loading {filepath} with comfy.utils.load_torch_file "
+                f"(aimdo/dynamic VRAM will be active if enabled)"
             )
             sd, metadata = comfy.utils.load_torch_file(
                 filepath, safe_load=True, return_metadata=True
             )
             logging.debug(
-                f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}"
+                f"Loaded state dict with keys: {list(sd.keys())[:10]}... "
+                f"and metadata keys: {list(metadata.keys())}"
             )
             return sd, metadata
     else:
         logging.warning(
-            "unifiedefficientloader not installed, falling back to comfy.utils.load_torch_file "
-            "(aimdo/dynamic VRAM will be active). Install with: pip install unifiedefficientloader"
+            "unifiedefficientloader not installed, falling back to "
+            "comfy.utils.load_torch_file. "
+            "Install with: pip install unifiedefficientloader"
         )
         sd, metadata = comfy.utils.load_torch_file(
             filepath, safe_load=True, return_metadata=True
         )
         logging.debug(
-            f"Loaded state dict with keys: {list(sd.keys())[:10]}... and metadata keys: {list(metadata.keys())}"
+            f"Loaded state dict with keys: {list(sd.keys())[:10]}... "
+            f"and metadata keys: {list(metadata.keys())}"
         )
         return sd, metadata
 
@@ -311,7 +349,9 @@ class QuantizedModelLoader:
         ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
 
         # 1. Load safetensors FIRST so we have sd + metadata for detection
-        sd, metadata = _load_safetensors(ckpt_path, low_memory=low_memory)
+        sd, metadata = _load_safetensors(
+            ckpt_path, low_memory=low_memory, disable_dynamic=disable_dynamic
+        )
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
         sd, metadata, qm = _prepare_state_dict(sd, metadata)
@@ -421,7 +461,9 @@ class QuantizedUNETLoader:
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
 
         # 1. Load safetensors FIRST
-        sd, metadata = _load_safetensors(unet_path, low_memory=low_memory)
+        sd, metadata = _load_safetensors(
+            unet_path, low_memory=low_memory, disable_dynamic=disable_dynamic
+        )
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
         sd, metadata, qm = _prepare_state_dict(sd, metadata)
@@ -533,7 +575,9 @@ class QuantizedCLIPLoader:
         }
 
         # 1. Load safetensors FIRST
-        sd, metadata = _load_safetensors(clip_path, low_memory=low_memory)
+        sd, metadata = _load_safetensors(
+            clip_path, low_memory=low_memory, disable_dynamic=disable_dynamic
+        )
 
         # 2. Inject .comfy_quant tensors from _quantization_metadata / legacy formats
         sd, metadata, qm = _prepare_state_dict(sd, metadata)
@@ -673,8 +717,12 @@ class QuantizedDualCLIPLoader:
         }
 
         # 1. Load both state dicts FIRST
-        sd1, metadata1 = _load_safetensors(clip_path1, low_memory=low_memory)
-        sd2, metadata2 = _load_safetensors(clip_path2, low_memory=low_memory)
+        sd1, metadata1 = _load_safetensors(
+            clip_path1, low_memory=low_memory, disable_dynamic=disable_dynamic
+        )
+        sd2, metadata2 = _load_safetensors(
+            clip_path2, low_memory=low_memory, disable_dynamic=disable_dynamic
+        )
 
         # 2. Inject .comfy_quant tensors for both
         sd1, metadata1, qm1 = _prepare_state_dict(sd1, metadata1)
@@ -1217,8 +1265,12 @@ class EfficientVAELoader:
         """Load a VAE model, bypassing aimdo/dynamic VRAM."""
         vae_path = folder_paths.get_full_path("vae", vae_name)
 
-        # Load safetensors directly, bypassing aimdo/dynamic VRAM
-        sd, metadata = _load_safetensors(vae_path, low_memory=low_memory)
+        # Load safetensors directly, bypassing aimdo/dynamic VRAM.
+        # VAE is always loaded statically (disable_dynamic=True) since
+        # comfy.sd.VAE() does not accept a disable_dynamic parameter.
+        sd, metadata = _load_safetensors(
+            vae_path, low_memory=low_memory, disable_dynamic=True
+        )
 
         # Construct VAE from state dict (comfy.sd.VAE auto-detects architecture)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)

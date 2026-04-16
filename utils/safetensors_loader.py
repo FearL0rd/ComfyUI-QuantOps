@@ -1,5 +1,9 @@
+import ctypes
 import json
 import logging
+import os
+import threading
+import warnings
 import torch
 from typing import Optional, Dict, Any, Tuple
 
@@ -12,6 +16,158 @@ except ImportError:
     tensor_to_dict = None
 
 logger = logging.getLogger(__name__)
+
+# Safetensors dtype string -> torch dtype (mirrors comfy/utils.py _TYPES)
+_SAFETENSORS_TYPES = {
+    "F64": torch.float64,
+    "F32": torch.float32,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "I16": torch.int16,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "C64": torch.complex64,
+    "U64": torch.uint64,
+    "U32": torch.uint32,
+    "U16": torch.uint16,
+}
+
+
+def mmap_load_safetensors(filepath):
+    """Load safetensors via mmap, stamping tensors with ComfyUI's dynamic VRAM
+    protocol attributes so ModelPatcherDynamic can page weights lazily.
+
+    Hybrid approach:
+    - ``UnifiedSafetensorsLoader(low_memory=True)`` parses the safetensors
+      header (handles dtype mapping, offset extraction, metadata).
+    - ``comfy_aimdo.model_mmap.ModelMMAP`` creates the OS memory mapping,
+      identical to what ``comfy/utils.py:load_safetensors()`` uses.
+    - Each tensor storage is stamped with the three ComfyUI protocol attrs:
+        ``_comfy_tensor_file_slice``   -- for fast file-based GPU staging
+        ``_comfy_tensor_mmap_refs``    -- keeps mmap + memoryview alive
+        ``_comfy_tensor_mmap_touched`` -- tracks OS page-in for residency
+    - Falls back to ``async_load_safetensors()`` (load_all) on any failure.
+
+    Used when ``disable_dynamic=False`` so ComfyUI's dynamic VRAM system
+    can page weights in/out on demand instead of holding the full model in RAM.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to a ``.safetensors`` file.
+
+    Returns
+    -------
+    state_dict : dict
+        Tensor name -> mmap-backed ``torch.Tensor`` (CPU, read-only view).
+    metadata : dict
+        File-level metadata from the safetensors header.
+    """
+    if not _UNIFIED_LOADER_AVAILABLE:
+        raise ImportError(
+            "unifiedefficientloader is required for mmap_load_safetensors. "
+            "Install with: pip install unifiedefficientloader"
+        )
+
+    # --- 1. Parse header via UEL (handles safetensors format details) ---
+    try:
+        loader = UnifiedSafetensorsLoader(filepath, low_memory=True)
+        header = loader._header
+        header_size = loader._header_size
+        metadata = loader.metadata() or {}
+        all_keys = loader.keys()
+        loader.close()
+    except Exception as e:
+        logger.warning(
+            f"mmap_load_safetensors: UEL header parse failed ({e}), "
+            f"falling back to async_load_safetensors"
+        )
+        return async_load_safetensors(filepath)
+
+    # --- 2. Import comfy_aimdo mmap and ComfyUI TensorFileSlice ---
+    try:
+        import comfy_aimdo.model_mmap
+        from comfy.memory_management import TensorFileSlice
+    except ImportError as e:
+        logger.warning(
+            f"mmap_load_safetensors: comfy_aimdo or TensorFileSlice unavailable "
+            f"({e}), falling back to async_load_safetensors"
+        )
+        return async_load_safetensors(filepath)
+
+    # --- 3. Create mmap mapping and unbuffered file handle ---
+    try:
+        model_mmap = comfy_aimdo.model_mmap.ModelMMAP(filepath)
+    except Exception as e:
+        logger.warning(
+            f"mmap_load_safetensors: ModelMMAP creation failed ({e}), "
+            f"falling back to async_load_safetensors"
+        )
+        return async_load_safetensors(filepath)
+
+    # Unbuffered file handle for TensorFileSlice fast-read path
+    f = open(filepath, "rb", buffering=0)
+    file_size = os.path.getsize(filepath)
+
+    # Full-file memoryview over the mmap'd region (read-only)
+    mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
+
+    # Safetensors data region starts after 8-byte LE length prefix + header JSON
+    data_base_offset = 8 + header_size
+    mv_data = mv[data_base_offset:]
+
+    # --- 4. Build state dict with mmap-backed stamped tensors ---
+    sd = {}
+    thread_id = threading.get_ident()
+
+    for name in all_keys:
+        info = header[name]
+        start, end = info["data_offsets"]
+
+        if start == end:
+            # Zero-size tensor: allocate empty (no data in file)
+            sd[name] = torch.empty(
+                info["shape"], dtype=_SAFETENSORS_TYPES[info["dtype"]]
+            )
+        else:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="The given buffer is not writable"
+                )
+                # Zero-copy view into mmap'd memory (read-only by design)
+                tensor = torch.frombuffer(
+                    mv_data[start:end],
+                    dtype=_SAFETENSORS_TYPES[info["dtype"]],
+                ).view(info["shape"])
+
+                storage = tensor.untyped_storage()
+
+                # --- ComfyUI dynamic VRAM protocol ---
+                # Enables read_tensor_file_slice_into() fast path (disk -> staging buf)
+                setattr(
+                    storage,
+                    "_comfy_tensor_file_slice",
+                    TensorFileSlice(
+                        f, thread_id, data_base_offset + start, end - start
+                    ),
+                )
+                # Keeps model_mmap and memoryview alive while any tensor is alive
+                setattr(storage, "_comfy_tensor_mmap_refs", (model_mmap, mv))
+                # Tracks OS page-faults for module_mmap_residency() accounting
+                setattr(storage, "_comfy_tensor_mmap_touched", False)
+
+                sd[name] = tensor
+
+    logger.info(
+        f"mmap_load_safetensors: {filepath}: {len(sd)} tensors, "
+        f"{len(metadata)} metadata keys (ComfyUI dynamic VRAM protocol active)"
+    )
+    return sd, metadata
 
 
 def async_load_safetensors(filepath):
