@@ -21,7 +21,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "unifiedefficientloader>=0.2.0"
+    "unifiedefficientloader>=0.2.1"
 ]
 
 [project.urls]
